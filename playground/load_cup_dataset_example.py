@@ -1,0 +1,164 @@
+#!/usr/bin/env python3
+"""
+Script to load and visualize an example episode from the cup_in_the_wild dataset
+"""
+
+import os
+import sys
+import numpy as np
+import matplotlib.pyplot as plt
+import zarr
+from tqdm import tqdm
+import cv2
+
+# Add the root directory to the path so we can import the necessary modules
+sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
+from diffusion_policy.dataset.umi_dataset import UmiDataset
+from diffusion_policy.common.replay_buffer import ReplayBuffer
+from diffusion_policy.codecs.imagecodecs_numcodecs import register_codecs
+
+# Register codecs for zarr compression
+register_codecs()
+
+# Dataset path
+DATASET_PATH = "/media/zfei/d/tempdata/umi/cup_in_the_wild/cup_in_the_wild.zarr.zip"
+
+def main():
+    print(f"Loading dataset from {DATASET_PATH}")
+    
+    # Define shape_meta for the UMI dataset (cup arrangement)
+    shape_meta = {
+        'obs': {
+            'camera0_rgb': {  # Note: corrected key from camera_0 to camera0_rgb to match dataset
+                'shape': [3, 224, 224],  # [C, H, W] - Standard size used by pretrained models
+                'type': 'rgb',
+                'horizon': 2,  # According to config: img_obs_horizon = 2
+                'latency_steps': 0,
+                'down_sample_steps': 3  # According to config: obs_down_sample_steps = 3
+            },
+            'robot0_eef_pos': {
+                'shape': [3],  # XYZ position
+                'type': 'low_dim',
+                'horizon': 2,  # According to config: low_dim_obs_horizon = 2
+                'latency_steps': 0,
+                'down_sample_steps': 3
+            },
+            'robot0_eef_rot_axis_angle': {
+                'shape': [3],  # Axis-angle rotation
+                'type': 'low_dim',
+                'horizon': 2,  # According to config: low_dim_obs_horizon = 2
+                'latency_steps': 0,
+                'down_sample_steps': 3
+            },
+            'robot0_gripper_width': {
+                'shape': [1],  # Gripper opening width
+                'type': 'low_dim',
+                'horizon': 2,  # According to config: low_dim_obs_horizon = 2
+                'latency_steps': 0,
+                'down_sample_steps': 3
+            },
+            'robot0_eef_rot_axis_angle_wrt_start': {
+                'raw_shape': [3],
+                'shape': [6],  # Using 6D rotation representation
+                'type': 'low_dim',
+                'horizon': 2,  # According to config: low_dim_obs_horizon = 2
+                'latency_steps': 0,
+                'down_sample_steps': 3
+            }
+        },
+        'action': {
+            'shape': [10],  # [position(3), rotation_6d(6), gripper(1)]
+            'horizon': 16,  # According to config: action_horizon = 16
+            'latency_steps': 0,
+            'down_sample_steps': 3,
+            'rotation_rep': 'rotation_6d'  # According to config: rotation_6d instead of axis_angle
+        }
+    }
+
+    # First, let's directly examine the zarr structure to better understand the dataset
+    print("Examining zarr structure...")
+    with zarr.ZipStore(DATASET_PATH, mode='r') as zip_store:
+        root = zarr.group(store=zip_store)
+        
+        # Print the structure of the zarr file
+        print("\nDataset structure:")
+        def print_zarr_structure(group, prefix=""):
+            for key, value in group.items():
+                if isinstance(value, zarr.Group):
+                    print(f"{prefix}{key}/")
+                    print_zarr_structure(value, prefix + "  ")
+                else:
+                    print(f"{prefix}{key}: shape={value.shape}, dtype={value.dtype}")
+        
+        print_zarr_structure(root)
+        
+        # Get episode boundaries
+        episodes = root['meta/episode_ends'][:]
+        print(f"\nTotal episodes: {len(episodes)}")
+        
+        # Load the dataset using the UmiDataset class
+        print("\nLoading dataset using UmiDataset...")
+        dataset = UmiDataset(
+            shape_meta=shape_meta,
+            dataset_path=DATASET_PATH,
+            val_ratio=0.0,  # Don't split validation for this example
+        )
+        
+        # Let's load and visualize a single episode (first episode for simplicity)
+        episode_idx = 0
+        start_idx = 0 if episode_idx == 0 else episodes[episode_idx-1]
+        end_idx = episodes[episode_idx]
+        
+        print(f"\nVisualization of Episode {episode_idx} (frames {start_idx} to {end_idx-1})")
+        
+        # Get raw data directly from replay buffer for visualization
+        rgb_data = root['data/camera0_rgb'][start_idx:end_idx]
+        positions = root['data/robot0_eef_pos'][start_idx:end_idx]
+        rotations = root['data/robot0_eef_rot_axis_angle'][start_idx:end_idx]
+        gripper = root['data/robot0_gripper_width'][start_idx:end_idx]
+        
+        # Create a directory to save visualizations
+        vis_dir = "visualization/cup_dataset_vis"
+        os.makedirs(vis_dir, exist_ok=True)
+        
+        # Visualize a few frames from this episode
+        num_frames = min(10, end_idx - start_idx)  # Show first 10 frames or all if fewer
+        for i in range(num_frames):
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+            
+            # The dataset images are already in [H,W,C] format, no need for transpose
+            img = rgb_data[i]
+            if img.dtype != np.uint8:
+                img = (img * 255).astype(np.uint8)
+            
+            # Display the image
+            ax1.imshow(img)
+            ax1.set_title(f"Frame {start_idx + i}")
+            ax1.axis('off')
+            
+            # Display robot state information
+            ax2.axis('off')
+            ax2.text(0.1, 0.7, f"Position: {positions[i]}", fontsize=12)
+            ax2.text(0.1, 0.6, f"Rotation: {rotations[i]}", fontsize=12)
+            ax2.text(0.1, 0.5, f"Gripper: {gripper[i]}", fontsize=12)
+            
+            # Save the figure
+            plt.tight_layout()
+            plt.savefig(os.path.join(vis_dir, f"frame_{i:04d}.png"))
+            plt.close()
+        
+        print(f"\nExample visualizations saved to {vis_dir}/")
+        
+        # Sample access via the dataset interface (like during training)
+        print("\nAccessing sample through dataset interface...")
+        sample = dataset[0]  # Get first sample
+        print("Sample keys:", sample.keys())
+        
+        # Print sample observation shapes
+        print("\nSample observation shapes:")
+        for k, v in sample['obs'].items():
+            print(f"  {k}: {v.shape}")
+        print(f"Action shape: {sample['action'].shape}")
+
+if __name__ == "__main__":
+    main()
