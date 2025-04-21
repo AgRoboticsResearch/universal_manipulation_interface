@@ -14,7 +14,6 @@ import cv2
 # Add the root directory to the path so we can import the necessary modules
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 from diffusion_policy.dataset.umi_dataset import UmiDataset
-from diffusion_policy.common.replay_buffer import ReplayBuffer
 from diffusion_policy.codecs.imagecodecs_numcodecs import register_codecs
 
 # Register codecs for zarr compression
@@ -118,20 +117,42 @@ def main():
         gripper = root['data/robot0_gripper_width'][start_idx:end_idx]
         
         # Create a directory to save visualizations
-        vis_dir = "visualization/cup_dataset_vis"
+        vis_dir = "/home/zfei/codes/unitree_ws/universal_manipulation_interface/visualization/cup_dataset_vis"
         os.makedirs(vis_dir, exist_ok=True)
         
-        # Visualize a few frames from this episode
-        num_frames = min(10, end_idx - start_idx)  # Show first 10 frames or all if fewer
-        for i in range(num_frames):
-            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
-            
-            # The dataset images are already in [H,W,C] format, no need for transpose
+        # First, save all image frames as JPEG files
+        print(f"\nSaving all {end_idx - start_idx} frames as JPEG images...")
+        for i in range(end_idx - start_idx):
             img = rgb_data[i]
             if img.dtype != np.uint8:
                 img = (img * 255).astype(np.uint8)
             
+            # Save the image as JPEG
+            cv2.imwrite(os.path.join(vis_dir, f"frame_{i:04d}.jpg"), cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
+            
+            # Print progress every 100 frames
+            if (i + 1) % 100 == 0:
+                print(f"  Saved {i+1}/{end_idx - start_idx} frames")
+        
+        # Save pose information as text file
+        print(f"\nSaving pose information to text file...")
+        pose_file = os.path.join(vis_dir, "episode_poses.txt")
+        with open(pose_file, 'w') as f:
+            f.write("frame_idx,pos_x,pos_y,pos_z,rot_x,rot_y,rot_z,gripper_width\n")
+            for i in range(end_idx - start_idx):
+                pos = positions[i]
+                rot = rotations[i]
+                grip = gripper[i][0]  # Extract scalar from [1] array
+                f.write(f"{i},{pos[0]},{pos[1]},{pos[2]},{rot[0]},{rot[1]},{rot[2]},{grip}\n")
+        
+        # Also create a few visualization figures with pose information
+        print(f"\nCreating visualization figures with pose information...")
+        num_vis_frames = min(10, end_idx - start_idx)  # Show 10 frames or all if fewer
+        for i in range(num_vis_frames):
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+            
             # Display the image
+            img = rgb_data[i]
             ax1.imshow(img)
             ax1.set_title(f"Frame {start_idx + i}")
             ax1.axis('off')
@@ -144,10 +165,10 @@ def main():
             
             # Save the figure
             plt.tight_layout()
-            plt.savefig(os.path.join(vis_dir, f"frame_{i:04d}.png"))
+            plt.savefig(os.path.join(vis_dir, f"vis_frame_{i:04d}.png"))
             plt.close()
         
-        print(f"\nExample visualizations saved to {vis_dir}/")
+        print(f"\nAll data saved to {vis_dir}/:")
         
         # Sample access via the dataset interface (like during training)
         print("\nAccessing sample through dataset interface...")
