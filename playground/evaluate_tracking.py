@@ -36,6 +36,24 @@ def plot_comparison(target_timestamps, target_poses, robot_timestamps, robot_pos
     plt.tight_layout()
     plt.show()
 
+def plot_3d_trajectory(target_poses, robot_poses, title="3D Trajectory Comparison"):
+    from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+    fig = plt.figure(figsize=(10, 8))
+    ax = fig.add_subplot(111, projection='3d')
+    ax.plot(target_poses[:, 0], target_poses[:, 1], target_poses[:, 2], 'b-', label='Target Trajectory', alpha=0.7)
+    ax.plot(robot_poses[:, 0], robot_poses[:, 1], robot_poses[:, 2], 'r-', label='Robot Trajectory', alpha=0.7)
+    ax.scatter(target_poses[0, 0], target_poses[0, 1], target_poses[0, 2], color='blue', s=60, label='Target Start')
+    ax.scatter(robot_poses[0, 0], robot_poses[0, 1], robot_poses[0, 2], color='red', s=60, label='Robot Start')
+    ax.scatter(target_poses[-1, 0], target_poses[-1, 1], target_poses[-1, 2], color='blue', s=60, marker='x', label='Target End')
+    ax.scatter(robot_poses[-1, 0], robot_poses[-1, 1], robot_poses[-1, 2], color='red', s=60, marker='x', label='Robot End')
+    ax.set_xlabel('X (m)')
+    ax.set_ylabel('Y (m)')
+    ax.set_zlabel('Z (m)')
+    ax.set_title(title)
+    ax.legend()
+    plt.tight_layout()
+    plt.show()
+
 def main():
     # Load all files
     target_ts, target_poses = load_data_with_timestamps("./temp/temp_target_poses.txt")
@@ -57,8 +75,11 @@ def main():
     print("Overall Mean Error:", np.mean(pose_mean_error))
     print("Overall RMSE:", np.mean(pose_rmse))
 
-    # Plot pose comparison
+    # Plot pose comparison (time-dim)
     plot_comparison(target_ts, target_poses, robot_pose_ts, robot_poses, label_prefix="Pose")
+
+    # Plot 3D trajectory comparison
+    plot_3d_trajectory(target_poses, interp_robot_poses, title="3D Trajectory Comparison (Target vs Robot)")
 
     # Compute and print joint errors (if target joints available, otherwise just plot)
     # Here, we only plot robot joints over time
