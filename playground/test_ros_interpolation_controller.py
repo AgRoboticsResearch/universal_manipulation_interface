@@ -10,6 +10,9 @@ import numpy as np
 import pandas as pd
 import rospy
 import argparse
+from visualization_msgs.msg import Marker, MarkerArray
+from geometry_msgs.msg import Point  # Import Point from geometry_msgs.msg
+import std_msgs.msg
 umi_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 import sys
 sys.path.append(umi_path)
@@ -103,9 +106,124 @@ def normalize_poses_to_current_tcp(poses, current_tcp_pose):
     
     return normalized_poses
 
+def publish_trajectory_markers(poses, publisher, frame_id="world", marker_lifetime=10.0):
+    """
+    Publish trajectory as visualization markers in RViz
+    
+    Parameters:
+    -----------
+    poses: numpy.ndarray
+        Array of poses [x, y, z, rx, ry, rz]
+    publisher: rospy.Publisher
+        ROS publisher for MarkerArray
+    frame_id: str
+        Reference frame for visualization
+    marker_lifetime: float
+        How long markers should persist (seconds)
+    """
+    marker_array = MarkerArray()
+    
+    # Create a marker for the trajectory path (line strip)
+    path_marker = Marker()
+    path_marker.header.frame_id = frame_id
+    path_marker.header.stamp = rospy.Time.now()
+    path_marker.ns = "trajectory_path"
+    path_marker.id = 0
+    path_marker.type = Marker.LINE_STRIP
+    path_marker.action = Marker.ADD
+    path_marker.scale.x = 0.001  # Line width
+    path_marker.color.r = 0.0
+    path_marker.color.g = 1.0
+    path_marker.color.b = 0.0
+    path_marker.color.a = 1.0
+    path_marker.lifetime = rospy.Duration(marker_lifetime)
+    
+    # Add points to the path marker
+    for pose in poses:
+        p = Point()  # Use geometry_msgs.msg.Point
+        p.x, p.y, p.z = pose[:3]
+        path_marker.points.append(p)
+    
+    marker_array.markers.append(path_marker)
+    
+    # Create markers for orientation arrows (every few poses to avoid clutter)
+    arrow_stride = max(1, len(poses) // 20)  # Show ~20 arrows along trajectory
+    for i in range(0, len(poses), arrow_stride):
+        pose = poses[i]
+        rot = Rotation.from_euler('xyz', pose[3:])
+        rot_matrix = rot.as_matrix()
+        
+        # Create markers for X, Y, Z axes
+        for axis_idx, color in enumerate([(1,0,0), (0,1,0), (0,0,1)]):
+            arrow = Marker()
+            arrow.header.frame_id = frame_id
+            arrow.header.stamp = rospy.Time.now()
+            arrow.ns = f"pose_orientation"
+            arrow.id = i * 3 + axis_idx
+            arrow.type = Marker.ARROW
+            arrow.action = Marker.ADD
+            arrow.scale.x = 0.005  # Shaft diameter
+            arrow.scale.y = 0.005  # Head diameter
+            arrow.scale.z = 0.01  # Head length
+            arrow.color.r = color[0]
+            arrow.color.g = color[1]
+            arrow.color.b = color[2]
+            arrow.color.a = 0.7
+            arrow.lifetime = rospy.Duration(marker_lifetime)
+            
+            # Set arrow start point
+            arrow.pose.position.x = pose[0]
+            arrow.pose.position.y = pose[1]
+            arrow.pose.position.z = pose[2]
+            
+            # Set arrow length and direction (based on rotation matrix)
+            axis_direction = rot_matrix[:, axis_idx]
+            arrow_length = 0.05  # 5cm arrows
+            
+            # Set arrow direction (points vector)
+            arrow.points.append(Point(x=0, y=0, z=0))  # Use Point directly
+            end_point = Point(
+                x=axis_direction[0] * arrow_length,
+                y=axis_direction[1] * arrow_length,
+                z=axis_direction[2] * arrow_length
+            )
+            arrow.points.append(end_point)
+            
+            marker_array.markers.append(arrow)
+    
+    # Numbered waypoints
+    for i in range(0, len(poses), arrow_stride):
+        pose = poses[i]
+        text_marker = Marker()
+        text_marker.header.frame_id = frame_id
+        text_marker.header.stamp = rospy.Time.now()
+        text_marker.ns = "waypoint_labels"
+        text_marker.id = i
+        text_marker.type = Marker.TEXT_VIEW_FACING
+        text_marker.action = Marker.ADD
+        text_marker.pose.position.x = pose[0]
+        text_marker.pose.position.y = pose[1]
+        text_marker.pose.position.z = pose[2] + 0.05  # Slightly above the waypoint
+        text_marker.scale.z = 0.02  # Text height
+        text_marker.color.r = 1.0
+        text_marker.color.g = 1.0
+        text_marker.color.b = 1.0
+        text_marker.color.a = 0.8
+        text_marker.lifetime = rospy.Duration(marker_lifetime)
+        text_marker.text = f"{i}"
+        
+        marker_array.markers.append(text_marker)
+    
+    # Publish the marker array
+    publisher.publish(marker_array)
+    print(f"Published trajectory markers with {len(poses)} waypoints")
+
 def main(args):
     # Configure ROS node
     rospy.init_node('test_ros_interpolation_controller', anonymous=True, disable_signals=True)
+    
+    # Create RViz visualization publisher
+    traj_viz_pub = rospy.Publisher('/trajectory_visualization', MarkerArray, queue_size=1, latch=True)
     
     # Load poses from file
     poses_file = args.poses_file
@@ -119,8 +237,8 @@ def main(args):
 
     # Use 10 poses for testing
     # poses = np.asarray([[0.3, 0, 0.5, 0, 0, 0]])
-    poses = poses[30:90]
-    timestamps = timestamps[30:90]
+    poses = poses[:100]
+    timestamps = timestamps[:100]
     print(f"Using {len(poses)} poses for testing")
     print(f"Poses: {poses}")
     print(f"Timestamps: {timestamps}")
@@ -148,6 +266,11 @@ def main(args):
         print("Normalizing poses to current TCP pose...")
         poses = normalize_poses_to_current_tcp(poses, current_tcp_pose)
         print(f"Normalized poses: {poses}")
+        
+        # Visualize the normalized trajectory in RViz
+        print("Publishing trajectory to RViz for visualization...")
+        publish_trajectory_markers(poses, traj_viz_pub, frame_id="world", marker_lifetime=50)
+        rospy.sleep(0.5)  # Small delay to ensure markers are published
 
 
     try:
