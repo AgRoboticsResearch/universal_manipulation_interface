@@ -10,6 +10,9 @@ import numpy as np
 import pandas as pd
 import rospy
 import argparse
+umi_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+import sys
+sys.path.append(umi_path)
 from umi.real_world.ros_interpolation_controller import ROSInterpolationController
 from scipy.spatial.transform import Rotation
 
@@ -55,6 +58,14 @@ def main(args):
     print(f"Loading poses from {poses_file}...")
     poses, timestamps, gripper_widths = load_poses_from_file(poses_file)
     print(f"Loaded {len(poses)} poses")
+
+    # Use 10 poses for testing
+    # poses = poses[:1]
+    poses = np.asarray([[0.3, 0, 0.5, 0, 0, 0]])
+    timestamps = timestamps[:1]
+    print(f"Using {len(poses)} poses for testing")
+    print(f"Poses: {poses}")
+    print(f"Timestamps: {timestamps}")
     
     # Initialize the controller
     joint_names = args.joint_names.split(',')
@@ -103,6 +114,7 @@ def main(args):
             
             # Schedule waypoint
             controller.schedule_waypoint(current_pose, target_time)
+            print(f"Scheduled waypoint {i}: {current_pose} at time {target_time}")
             
             if i % 10 == 0:  # Print progress every 10 waypoints
                 print(f"Scheduled waypoint {i}/{len(poses)}: {current_pose}")
@@ -132,14 +144,14 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Test ROS Interpolation Controller')
     parser.add_argument('--poses-file', type=str, 
-                        default='/home/zfei/codes/unitree_ws/universal_manipulation_interface/visualization/cup_dataset_vis/episode_poses.txt',
+                        default='/codes/unitree_ws/universal_manipulation_interface/visualization/cup_dataset_vis/episode_poses.txt',
                         help='Path to the file containing poses')
     parser.add_argument('--joint-names', type=str, 
                         default='joint1,joint2,joint3,joint4,joint5,joint6',
                         help='Comma-separated list of joint names')
     parser.add_argument('--group-name', type=str, default='manipulator',
                         help='MoveIt group name for IK/FK')
-    parser.add_argument('--eef-link', type=str, default='tool0',
+    parser.add_argument('--eef-link', type=str, default='link06',
                         help='End effector link name')
     parser.add_argument('--traj-action-name', type=str, 
                         default='/z1_joint_traj_controller/follow_joint_trajectory',

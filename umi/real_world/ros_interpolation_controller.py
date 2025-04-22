@@ -42,7 +42,8 @@ class ROSInterpolationController:
                  get_max_k=None,
                  receive_latency=0.0,
                  group_name="manipulator",
-                 eef_link=None):
+                 eef_link="link06",
+                 reference_frame="link00"):
         """
         ROS Interpolation Controller with interface compatible with RTDEInterpolationController
         
@@ -88,6 +89,8 @@ class ROSInterpolationController:
             MoveIt group name for IK/FK calculations
         eef_link: str
             End effector link name for IK/FK calculations
+        reference_frame: str
+            Reference frame for IK/FK calculations (default: 'link00')
         """
         if joint_names is None:
             # Default joint names if none provided
@@ -112,6 +115,7 @@ class ROSInterpolationController:
         self.receive_latency = receive_latency
         self.group_name = group_name
         self.eef_link = eef_link
+        self.reference_frame = reference_frame
         
         # Initialize the maximum buffer size for state history
         self.max_buffer_size = 500
@@ -151,9 +155,6 @@ class ROSInterpolationController:
 
         # Initialize IK/FK services
         self._initialize_kinematics()
-        
-        # Reference frame for IK/FK
-        self.reference_frame = "base_link"
         
         # TF listener for potential transformations
         self.tf_buffer = tf2_ros.Buffer(rospy.Duration(10.0))
@@ -279,8 +280,7 @@ class ROSInterpolationController:
         if self.eef_link:
             fk_request.fk_link_names = [self.eef_link]
         else:
-            # Use the last link in the chain if no specific end effector is specified
-            fk_request.fk_link_names = ["tool0"]  # Common name for the tool frame in ROS
+            raise ValueError("End effector link name is required for FK computation")
             
         # Set the robot state
         from sensor_msgs.msg import JointState
@@ -361,6 +361,7 @@ class ROSInterpolationController:
                 self.state_buffer['ActualQd'].append(np.array(current_joint_velocities))
                 self.state_buffer['robot_timestamp'].append(t_stamp)
                 self.state_buffer['robot_receive_timestamp'].append(t_recv)
+                # print(f"Joint states updated: {self.current_joint_positions}")
                 
                 # Compute TCP pose using forward kinematics
                 success, pose, _ = self.compute_fk(self.current_joint_positions)
@@ -430,12 +431,23 @@ class ROSInterpolationController:
         }
         self.command_queue.put(message)
         
+    def getActualTCPPose(self):
+        """
+        Get the current TCP pose of the robot
+        
+        Returns:
+        --------
+        tcp_pose: numpy.ndarray
+            Current TCP pose as [x, y, z, rx, ry, rz]
+        """
+        with self.pose_lock:
+            return np.array(self.current_pose)
+            
     def run(self):
         """Main control loop"""
         # Handle initial joint positions if provided
         if self.joints_init is not None:
-            if self.verbose:
-                rospy.loginfo(f"Moving to initial joint positions: {self.joints_init}")
+            rospy.loginfo(f"Moving to initial joint positions: {self.joints_init}")
                 
             traj = JointTrajectory()
             traj.joint_names = self.joint_names
@@ -454,7 +466,7 @@ class ROSInterpolationController:
         iter_idx = 0
         
         # Initialize pose interpolator
-        curr_pose = np.zeros(6)  # Initial pose placeholder
+        curr_pose = self.getActualTCPPose()  # Use the actual TCP pose
         curr_t = time.monotonic()
         last_waypoint_time = curr_t
         pose_interp = PoseTrajectoryInterpolator(
@@ -513,6 +525,7 @@ class ROSInterpolationController:
                 
                 # Get interpolated pose for current time
                 cartesian_pose = pose_interp(t_now)
+                rospy.loginfo(f"Interpolated pose: {cartesian_pose}")
                 
                 # Convert from [x,y,z,rx,ry,rz] to Pose message
                 pose_msg = Pose()
@@ -530,6 +543,7 @@ class ROSInterpolationController:
                 
                 # Compute IK for the pose
                 success, joint_positions, computation_time = self.compute_ik(pose_msg)
+                rospy.loginfo(f"IK computation time: {computation_time:.4f}s, success: {success}, joint_positions: {joint_positions}")
                 
                 if success and joint_positions is not None:
                     # Create and send trajectory for this control cycle
@@ -690,7 +704,8 @@ if __name__ == '__main__':
     controller = ROSInterpolationController(
         joint_names=joint_names, 
         group_name="manipulator",
-        eef_link="tool0"
+        eef_link="tool0",
+        verbose=True
     )
     try:
         # Example: move to [0,0,0.5,0,0,0] in 2 seconds from now
