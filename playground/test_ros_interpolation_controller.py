@@ -18,6 +18,7 @@ import sys
 sys.path.append(umi_path)
 from umi.real_world.ros_interpolation_controller import ROSInterpolationController
 from scipy.spatial.transform import Rotation
+import threading
 
 def load_poses_from_file(file_path):
     """
@@ -218,6 +219,36 @@ def publish_trajectory_markers(poses, publisher, frame_id="world", marker_lifeti
     publisher.publish(marker_array)
     print(f"Published trajectory markers with {len(poses)} waypoints")
 
+def save_array_to_txt(array, filename):
+    np.savetxt(filename, array, fmt="%.6f", delimiter=",")
+    print(f"Saved array to {filename}")
+
+def save_list_to_txt(lst, filename):
+    np.savetxt(filename, np.array(lst), fmt="%.6f", delimiter=",")
+    print(f"Saved list to {filename}")
+
+def save_array_with_timestamps(array, timestamps, filename):
+    array = np.asarray(array)
+    timestamps = np.asarray(timestamps).reshape(-1, 1)
+    data = np.hstack([timestamps, array])
+    np.savetxt(filename, data, fmt="%.6f", delimiter=",")
+    print(f"Saved array with timestamps to {filename}")
+
+def periodic_state_sampler(controller, joint_states_list, joint_times_list, tcp_poses_list, tcp_times_list, stop_event, frequency=10.0):
+    period = 1.0 / frequency
+    while not stop_event.is_set():
+        try:
+            joint_state = controller.get_current_joint_positions()
+            tcp_pose = controller.getActualTCPPose()
+            now = time.time()
+            joint_states_list.append(joint_state)
+            joint_times_list.append(now)
+            tcp_poses_list.append(tcp_pose)
+            tcp_times_list.append(now)
+        except Exception as e:
+            print(f"Warning: Failed to get robot state during periodic sampling: {e}")
+        time.sleep(period)
+
 def main(args):
     # Configure ROS node
     rospy.init_node('test_ros_interpolation_controller', anonymous=True, disable_signals=True)
@@ -266,12 +297,23 @@ def main(args):
         print("Normalizing poses to current TCP pose...")
         poses = normalize_poses_to_current_tcp(poses, current_tcp_pose)
         print(f"Normalized poses: {poses}")
-        
+        # Save normalized target poses if eval_track is enabled
+        if getattr(args, 'eval_track', False):
+            save_array_with_timestamps(poses, timestamps, "./temp/temp_target_poses.txt")
         # Visualize the normalized trajectory in RViz
         print("Publishing trajectory to RViz for visualization...")
         publish_trajectory_markers(poses, traj_viz_pub, frame_id="world", marker_lifetime=50)
         rospy.sleep(0.5)  # Small delay to ensure markers are published
 
+    # Prepare for tracking robot states and poses if eval_track is enabled
+    robot_joint_states = []
+    robot_joint_times = []
+    robot_tcp_poses = []
+    robot_tcp_times = []
+    sampler_stop_event = threading.Event() if getattr(args, 'eval_track', False) else None
+    if getattr(args, 'eval_track', False):
+        os.makedirs("./temp", exist_ok=True)
+    sampler_thread = None
 
     try:
         # Start the controller
@@ -283,6 +325,15 @@ def main(args):
         while not controller.is_ready:
             rospy.sleep(0.1)
         print("Controller is ready")
+
+        # Start periodic sampling thread if eval_track is enabled
+        if getattr(args, 'eval_track', False):
+            sampler_thread = threading.Thread(
+                target=periodic_state_sampler,
+                args=(controller, robot_joint_states, robot_joint_times, robot_tcp_poses, robot_tcp_times, sampler_stop_event, args.frequency),
+                daemon=True
+            )
+            sampler_thread.start()
 
         # Get current time as base
         base_time = time.time()
@@ -326,6 +377,16 @@ def main(args):
             
         print("Trajectory execution completed")
         
+        # Stop periodic sampling thread if running
+        if getattr(args, 'eval_track', False) and sampler_thread is not None:
+            sampler_stop_event.set()
+            sampler_thread.join()
+        
+        # Save tracked robot states and poses if eval_track is enabled
+        if getattr(args, 'eval_track', False):
+            save_array_with_timestamps(robot_joint_states, robot_joint_times, "./temp/temp_robot_states.txt")
+            save_array_with_timestamps(robot_tcp_poses, robot_tcp_times, "./temp/temp_robot_poses.txt")
+        
     except KeyboardInterrupt:
         print("Keyboard interrupt detected. Stopping...")
     finally:
@@ -363,6 +424,8 @@ if __name__ == "__main__":
                         help='Stop execution when ROS shutdown is detected')
     parser.add_argument('--verbose', action='store_true',
                         help='Enable verbose output')
+    parser.add_argument('--eval-track', action='store_true',
+                        help='Save normalized target poses, robot joint states, and TCP poses during execution')
     parser.add_argument('--no-normalize-poses', dest='normalize_poses', action='store_false',
                         help='Disable pose normalization relative to current TCP pose')
     parser.set_defaults(normalize_poses=True)
