@@ -150,7 +150,7 @@ class ROSInterpolationController:
         self.ready_event = threading.Event()
         
         # Current pose tracking
-        self.current_pose = [0.0] * 6  # [x, y, z, rx, ry, rz]
+        self.current_pose = None
         self.pose_lock = threading.Lock()
 
         # Initialize IK/FK services
@@ -440,8 +440,11 @@ class ROSInterpolationController:
         tcp_pose: numpy.ndarray
             Current TCP pose as [x, y, z, rx, ry, rz]
         """
-        with self.pose_lock:
-            return np.array(self.current_pose)
+        while self.current_pose is None:
+            with self.pose_lock:
+                current_pose = self.current_pose
+            time.sleep(0.01)  # Wait for the pose to be updated
+        return self.current_pose
             
     def run(self):
         """Main control loop"""
@@ -525,7 +528,8 @@ class ROSInterpolationController:
                 
                 # Get interpolated pose for current time
                 cartesian_pose = pose_interp(t_now)
-                rospy.loginfo(f"Interpolated pose: {cartesian_pose}")
+                if self.verbose:
+                    rospy.loginfo(f"Interpolated pose: {cartesian_pose}")
                 
                 # Convert from [x,y,z,rx,ry,rz] to Pose message
                 pose_msg = Pose()
@@ -543,7 +547,8 @@ class ROSInterpolationController:
                 
                 # Compute IK for the pose
                 success, joint_positions, computation_time = self.compute_ik(pose_msg)
-                rospy.loginfo(f"IK computation time: {computation_time:.4f}s, success: {success}, joint_positions: {joint_positions}")
+                if self.verbose:
+                    rospy.loginfo(f"IK computation time: {computation_time:.4f}s, success: {success}, joint_positions: {joint_positions}")
                 
                 if success and joint_positions is not None:
                     # Create and send trajectory for this control cycle
