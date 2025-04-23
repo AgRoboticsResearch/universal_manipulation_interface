@@ -599,13 +599,13 @@ if __name__ == "__main__":
     parser.add_argument('--traj-action-name', type=str, 
                         default='/z1_joint_traj_controller/follow_joint_trajectory',
                         help='Joint trajectory action server name')
-    parser.add_argument('--frequency', type=float, default=10.0,
+    parser.add_argument('--frequency', type=float, default=30.0,
                         help='Control frequency (Hz)')
     parser.add_argument('--max-pos-speed', type=float, default=0.25,
                         help='Maximum position speed (m/s)')
     parser.add_argument('--max-rot-speed', type=float, default=0.16,
                         help='Maximum rotation speed (rad/s)')
-    parser.add_argument('--delay', type=float, default=1.0,
+    parser.add_argument('--delay', type=float, default=0.1,
                         help='Delay before starting trajectory (seconds)')
     parser.add_argument('--smooth-factor', type=float, default=0,
                         help='Smoothing factor for pose transitions (0-1, higher is smoother)')

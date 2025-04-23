@@ -596,7 +596,7 @@ class ROSInterpolationController:
                         print(f"DEBUG: Sending IK solution at {time.time():.6f}: {joint_positions}")
                     
                     send_start = time.monotonic()
-                    self.trajectory_client.send_goal_and_wait(goal, rospy.Duration(dt*0.9))
+                    self.trajectory_client.send_goal_and_wait(goal, rospy.Duration(dt*0.5))
                     send_duration = time.monotonic() - send_start
                     
                     # Debug: Print send duration if it's taking too long
