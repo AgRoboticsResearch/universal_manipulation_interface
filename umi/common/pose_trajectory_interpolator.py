@@ -114,6 +114,9 @@ class PoseTrajectoryInterpolator:
         if last_waypoint_time is not None:
             assert curr_time is not None
 
+        # Debug: Print initial info
+        initial_length = len(self.times)
+        
         # trim current interpolator to between curr_time and last_waypoint_time
         start_time = self.times[0]
         end_time = self.times[-1]
@@ -121,6 +124,8 @@ class PoseTrajectoryInterpolator:
 
         if curr_time is not None:
             if time <= curr_time:
+                # Debug: Print when waypoint is skipped due to being in the past
+                print(f"DEBUG: Skipping waypoint - target_time {time:.3f} <= curr_time {curr_time:.3f}")
                 # if insert time is earlier than current time
                 # no effect should be done to the interpolator
                 return self
@@ -131,14 +136,23 @@ class PoseTrajectoryInterpolator:
                 # if last_waypoint_time is earlier than start_time
                 # use start_time
                 if time <= last_waypoint_time:
+                    # Debug: Print when time <= last_waypoint_time
+                    print(f"DEBUG: time {time:.3f} <= last_waypoint_time {last_waypoint_time:.3f}, setting end_time to curr_time {curr_time:.3f}")
                     end_time = curr_time
                 else:
                     end_time = max(last_waypoint_time, curr_time)
+                    # Debug: Print when updating end_time
+                    print(f"DEBUG: Updated end_time to max(last_waypoint_time {last_waypoint_time:.3f}, curr_time {curr_time:.3f}) = {end_time:.3f}")
             else:
                 end_time = curr_time
+                # Debug: Print when setting end_time to curr_time
+                print(f"DEBUG: Setting end_time to curr_time {curr_time:.3f}")
 
         end_time = min(end_time, time)
         start_time = min(start_time, end_time)
+        # Debug: Print final start_time and end_time
+        print(f"DEBUG: Final start_time={start_time:.3f}, end_time={end_time:.3f}, time={time:.3f}")
+
         # end time should be the latest of all times except time
         # after this we can assume order (proven by zhenjia, due to the 2 min operations)
 
@@ -163,6 +177,8 @@ class PoseTrajectoryInterpolator:
             assert curr_time <= time
 
         trimmed_interp = self.trim(start_time, end_time)
+        # Debug: Print how many points were trimmed
+        print(f"DEBUG: Trimmed interpolator from {initial_length} to {len(trimmed_interp.times)} points")
         # after this, all waypoints in trimmed_interp is within start_time and end_time
         # and is earlier than time
 
@@ -175,6 +191,9 @@ class PoseTrajectoryInterpolator:
         duration = max(duration, max(pos_min_duration, rot_min_duration))
         assert duration >= 0
         last_waypoint_time = end_time + duration
+        # Debug: Print duration and distances
+        print(f"DEBUG: pos_dist={pos_dist:.6f}, rot_dist={rot_dist:.6f}, pos_min_duration={pos_min_duration:.6f}, rot_min_duration={rot_min_duration:.6f}")
+        print(f"DEBUG: Final duration={duration:.6f}, last_waypoint_time={last_waypoint_time:.3f}")
 
         # insert new pose
         times = np.append(trimmed_interp.times, [last_waypoint_time], axis=0)
@@ -182,6 +201,9 @@ class PoseTrajectoryInterpolator:
 
         # create new interpolator
         final_interp = PoseTrajectoryInterpolator(times, poses)
+        # Debug: Print final size
+        print(f"DEBUG: Final interpolator size: {len(final_interp.times)} points")
+        
         return final_interp
 
 

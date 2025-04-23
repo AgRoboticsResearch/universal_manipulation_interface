@@ -2,6 +2,7 @@
 """
 Test script for the ROS interpolation controller.
 Loads poses from episode_poses.txt and executes the trajectory.
+Uses batch trajectory execution by sending a single JointTrajectory message.
 """
 
 import os
@@ -11,7 +12,10 @@ import pandas as pd
 import rospy
 import argparse
 from visualization_msgs.msg import Marker, MarkerArray
-from geometry_msgs.msg import Point  # Import Point from geometry_msgs.msg
+from geometry_msgs.msg import Point, Pose
+from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+from control_msgs.msg import FollowJointTrajectoryAction, FollowJointTrajectoryGoal
+from std_msgs.msg import Header
 import std_msgs.msg
 umi_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 import sys
@@ -251,7 +255,7 @@ def periodic_state_sampler(controller, joint_states_list, joint_times_list, tcp_
 
 def main(args):
     # Configure ROS node
-    rospy.init_node('test_ros_interpolation_controller', anonymous=True, disable_signals=True)
+    rospy.init_node('test_ros_interpolation_controller', anonymous=False, disable_signals=True)
     
     # Create RViz visualization publisher
     traj_viz_pub = rospy.Publisher('/trajectory_visualization', MarkerArray, queue_size=1, latch=True)
@@ -266,30 +270,26 @@ def main(args):
     poses, timestamps, gripper_widths = load_poses_from_file(poses_file)
     print(f"Loaded {len(poses)} poses")
 
-    # Use 10 poses for testing
-    # poses = np.asarray([[0.3, 0, 0.5, 0, 0, 0]])
-    poses = poses[:90]
-    timestamps = timestamps[:90]
+    # Use specified number of poses for testing
+    poses = poses[:args.num_poses]
+    timestamps = timestamps[:args.num_poses]
     print(f"Using {len(poses)} poses for testing")
-    print(f"Poses: {poses}")
-    print(f"Timestamps: {timestamps}")
+    if args.verbose:
+        print(f"Timestamps: {timestamps}")
 
-    # repeat the poses back and forth for 10 times
-    print("Repeating poses back and forth for 10 times...")
-    whole_poses = poses.copy()
-    whole_timestamps = timestamps.copy()
-    for i in range(10):
-        current_pose = poses.copy() if i % 2 == 0 else poses[::-1]
-        whole_poses = np.concatenate((whole_poses, current_pose), axis=0)
-        whole_timestamps = np.concatenate((whole_timestamps, timestamps + (i + 1) * 9), axis=0)
-    poses = whole_poses
-    timestamps = whole_timestamps
-    print(f"Poses: {poses}")
-    print(f"Timestamps: {timestamps}")
-
-    
-
-
+    # repeat the poses back and forth for specified number of times
+    args.repeat_count = 0
+    if args.repeat_count > 0:
+        print(f"Repeating poses back and forth for {args.repeat_count} times...")
+        whole_poses = poses.copy()
+        for i in range(args.repeat_count):
+            current_pose = poses.copy() if i % 2 == 0 else poses[::-1]
+            whole_poses = np.concatenate((whole_poses, current_pose), axis=0)
+        poses = whole_poses
+        delay_between_poses = 0.2
+        timestamps = np.asarray([i * delay_between_poses for i in range(len(poses))])
+        print(f"Total poses: {len(poses)}")
+        print(f"timestamps: {timestamps}")
 
     # Initialize the controller
     joint_names = args.joint_names.split(',')
@@ -307,14 +307,23 @@ def main(args):
     
     # Normalize poses relative to current TCP pose
     # Get current TCP pose to use as reference
-    current_tcp_pose = controller.getActualTCPPose()
-    print(f"Current TCP pose: {current_tcp_pose}")
+    try:
+        controller.start(wait=True)
+        current_tcp_pose = controller.getActualTCPPose()
+        print(f"Current TCP pose: {current_tcp_pose}")
+    except Exception as e:
+        print(f"Error getting current TCP pose: {e}")
+        controller.stop(wait=True)
+        return
+    
     if args.normalize_poses:
         print("Normalizing poses to current TCP pose...")
         poses = normalize_poses_to_current_tcp(poses, current_tcp_pose)
-        print(f"Normalized poses: {poses}")
+        if args.verbose:
+            print(f"Normalized poses: {poses}")
         # Save normalized target poses if eval_track is enabled
         if getattr(args, 'eval_track', False):
+            os.makedirs("./temp", exist_ok=True)
             save_array_with_timestamps(poses, timestamps, "./temp/temp_target_poses.txt")
         # Visualize the normalized trajectory in RViz
         print("Publishing trajectory to RViz for visualization...")
@@ -332,11 +341,6 @@ def main(args):
     sampler_thread = None
 
     try:
-        # Start the controller
-        print("Starting controller...")
-        controller.start(wait=True)
-        print("Controller started")
-        
         # Wait until the controller is ready
         while not controller.is_ready:
             rospy.sleep(0.1)
@@ -351,74 +355,93 @@ def main(args):
             )
             sampler_thread.start()
 
-        # Get current time as base
-        base_time = time.time()
+        # === BATCH TRAJECTORY EXECUTION ===
+        # Instead of sending each waypoint individually, create a single JointTrajectory message
+        print(f"Preparing batch trajectory with {len(poses)} waypoints...")
+
+        # Get current joint positions for starting point
+        current_joints = controller.get_current_joint_positions()
         
-        # Adjust timestamps to be relative to current time
-        execution_timestamps = base_time + timestamps + args.delay
+        # Create the joint trajectory message
+        joint_traj = JointTrajectory()
+        joint_traj.header = Header()
+        joint_traj.header.stamp = rospy.Time.now() + rospy.Duration(args.delay)
+        joint_traj.joint_names = joint_names
         
-        # Execute trajectory
-        print(f"Executing {len(poses)} waypoints...")
-        
-        # Get current monotonic time for debugging
-        mono_start = time.monotonic()
-        wall_start = time.time()
-        print(f"DEBUG: Start time - wall: {wall_start:.6f}, monotonic: {mono_start:.6f}, diff: {mono_start-wall_start:.6f}")
-        
-        for i in range(len(poses)):
+        # Convert poses to joint positions using IK and add to trajectory
+        joint_traj_points = []
+        success_count = 0
+        for i, pose in enumerate(poses):
             if args.stop_on_shutdown and rospy.is_shutdown():
                 print("ROS shutdown detected, stopping execution")
                 break
-                
-            current_pose = poses[i]
-            target_time = execution_timestamps[i]
             
-            # Calculate time remaining until target
-            time_until_target = target_time - time.time()
+            # Convert from [x,y,z,rx,ry,rz] to Pose message
+            pose_msg = Pose()
+            pose_msg.position.x = pose[0]
+            pose_msg.position.y = pose[1]
+            pose_msg.position.z = pose[2]
             
-            # Skip waypoints that are in the past
-            if target_time <= time.time():
-                print(f"DEBUG: Skipping waypoint {i} - target_time {target_time:.6f} <= current time {time.time():.6f} (delta: {time.time()-target_time:.6f}s)")
+            # Convert from Euler angles to quaternion
+            rotation = Rotation.from_euler('xyz', pose[3:6])
+            quat = rotation.as_quat()
+            pose_msg.orientation.x = quat[0]
+            pose_msg.orientation.y = quat[1]
+            pose_msg.orientation.z = quat[2]
+            pose_msg.orientation.w = quat[3]
+            
+            # Use controller's compute_ik method to get joint positions for this pose
+            success, joint_positions, _ = controller.compute_ik(pose_msg)
+            
+            if not success or joint_positions is None:
+                print(f"Warning: IK failed for pose {i}, skipping.")
                 continue
-            
-            # Debug print to show timing
-            print(f"DEBUG: Scheduling waypoint {i}/{len(poses)} - target in {time_until_target:.6f}s")
-            print(f"DEBUG:   - wall target: {target_time:.6f}, current: {time.time():.6f}")
-            print(f"DEBUG:   - monotonic equiv: {time.monotonic() - time.time() + target_time:.6f}, current: {time.monotonic():.6f}")
-            
-            # Schedule waypoint
-            controller.schedule_waypoint(current_pose, target_time)
-            
-            # Print more status info for debugging
-            if i % 10 == 0 or i < 5 or i > len(poses) - 5:  # Print more frequently at start and end
-                print(f"Scheduled waypoint {i}/{len(poses)}: {current_pose} at {target_time:.6f} (in {time_until_target:.3f}s)")
                 
-                # Calculate trajectory stats for debugging
-                if i > 0:
-                    time_diff = target_time - execution_timestamps[i-1]
-                    pose_diff = np.linalg.norm(poses[i] - poses[i-1])
-                    speed = pose_diff / time_diff if time_diff > 0 else float('inf')
-                    print(f"DEBUG:   - Time between points: {time_diff:.6f}s, distance: {pose_diff:.6f}m, speed: {speed:.6f}m/s")
+            # Create a joint trajectory point
+            point = JointTrajectoryPoint()
+            point.positions = joint_positions
             
-            # Optional: slow down scheduling for debugging
-            if args.schedule_delay > 0:
-                time.sleep(args.schedule_delay)
-        
-        print("All waypoints scheduled. Waiting for trajectory completion...")
-        
-        # Wait until the trajectory is expected to finish
-        last_timestamp = execution_timestamps[-1] + 2.0  # Add buffer time
-        wait_time = last_timestamp - time.time()
-        # wait_time = wait_time + 10
-        if wait_time > 0:
-            time.sleep(wait_time)
+            # Use relative timestamps for the trajectory
+            point.time_from_start = rospy.Duration(timestamps[i])
+            joint_traj_points.append(point)
+            success_count += 1
             
-        print("Trajectory execution completed")
+            if i % 50 == 0 or i == len(poses) - 1:  # Print progress every 50 waypoints
+                print(f"Processed waypoint {i+1}/{len(poses)}")
+        
+        print(f"Successfully converted {success_count}/{len(poses)} poses to joint trajectory points")
+        
+        # Add all points to the trajectory
+        joint_traj.points = joint_traj_points
+        
+        # Send the entire trajectory as a single goal
+        print(f"Sending batch trajectory with {len(joint_traj_points)} points...")
+        
+        # Create an action goal
+        goal = FollowJointTrajectoryGoal()
+        goal.trajectory = joint_traj
+        
+        # Send the goal to the action server
+        start_time = time.time()
+        controller.trajectory_client.send_goal(goal)
+        print(f"Batch trajectory sent at {time.strftime('%H:%M:%S')}. Waiting for trajectory completion...")
+        
+        # Wait for trajectory execution to complete
+        controller.trajectory_client.wait_for_result()
+        time.sleep(10)
+        end_time = time.time()
+        result = controller.trajectory_client.get_result()
+        print(f"Trajectory execution completed in {end_time - start_time:.2f} seconds")
+        if result:
+            if result.error_code == 0:
+                print("Execution successful!")
+            else:
+                print(f"Execution finished with error code: {result.error_code}, message: {result.error_string}")
         
         # Stop periodic sampling thread if running
         if getattr(args, 'eval_track', False) and sampler_thread is not None:
             sampler_stop_event.set()
-            sampler_thread.join()
+            sampler_thread.join(timeout=1.0)
         
         # Save tracked robot states and poses if eval_track is enabled
         if getattr(args, 'eval_track', False):
@@ -427,12 +450,20 @@ def main(args):
         
     except KeyboardInterrupt:
         print("Keyboard interrupt detected. Stopping...")
+    except Exception as e:
+        print(f"Error during execution: {e}")
     finally:
-        # Stop the controller
+        # Clear any pending print operations before stopping controller
+        sys.stdout.flush()
+        
+        # Stop the controller gracefully
         print("Stopping controller...")
         controller.stop(wait=True)
+        
+        # Give ROS a moment to finish any pending tasks
+        rospy.sleep(0.5)
         print("Controller stopped")
-
+        
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Test ROS Interpolation Controller')
     parser.add_argument('--poses-file', type=str, 
@@ -466,6 +497,10 @@ if __name__ == "__main__":
                         help='Save normalized target poses, robot joint states, and TCP poses during execution')
     parser.add_argument('--no-normalize-poses', dest='normalize_poses', action='store_false',
                         help='Disable pose normalization relative to current TCP pose')
+    parser.add_argument('--num-poses', type=int, default=90,
+                        help='Number of poses to use from the loaded file')
+    parser.add_argument('--repeat-count', type=int, default=10,
+                        help='Number of times to repeat the poses back and forth (0 to disable)')
     parser.set_defaults(normalize_poses=True)
     
     args = parser.parse_args()

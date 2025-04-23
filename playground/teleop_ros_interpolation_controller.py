@@ -513,7 +513,7 @@ class VOTeleopController:
                     
                     # Schedule waypoint with the controller
                     # Add a small delay for stability
-                    delay = 0.5
+                    delay = 1
                     self.controller.schedule_waypoint(target_pose, time.time() + delay)
                     
                     # Publish target pose for visualization
@@ -599,7 +599,7 @@ if __name__ == "__main__":
     parser.add_argument('--traj-action-name', type=str, 
                         default='/z1_joint_traj_controller/follow_joint_trajectory',
                         help='Joint trajectory action server name')
-    parser.add_argument('--frequency', type=float, default=30.0,
+    parser.add_argument('--frequency', type=float, default=10.0,
                         help='Control frequency (Hz)')
     parser.add_argument('--max-pos-speed', type=float, default=0.25,
                         help='Maximum position speed (m/s)')
