@@ -326,12 +326,12 @@ class VOTeleopController:
         
         # Initialize ROS services
         self.toggle_camera_service = rospy.Service(
-            '~/toggle_camera_following', 
+            '/vo_teleop_controller/toggle_camera_following', 
             Trigger, 
             self.toggle_camera_following_service
         )
         self.reset_home_service = rospy.Service(
-            '~/reset_to_home', 
+            '/vo_teleop_controller/reset_to_home', 
             Trigger, 
             self.reset_to_home_service
         )
@@ -339,6 +339,10 @@ class VOTeleopController:
         
         # Initialize the controller
         self.init_controller()
+        
+        # Buffer for last 100 target poses
+        self.target_pose_buffer = []
+        self.target_pose_buffer_size = 100
     
     # Add service callback handlers
     def toggle_camera_following_service(self, req):
@@ -543,6 +547,18 @@ class VOTeleopController:
                     marker_array.markers.append(marker)
                     self.target_pose_pub.publish(marker_array)
                     
+                    # --- Moving window trajectory visualization ---
+                    self.target_pose_buffer.append(target_pose.copy())
+                    if len(self.target_pose_buffer) > self.target_pose_buffer_size:
+                        self.target_pose_buffer.pop(0)
+                    if len(self.target_pose_buffer) > 1:
+                        publish_trajectory_markers(
+                            np.array(self.target_pose_buffer),
+                            self.traj_viz_pub,
+                            frame_id="world",
+                            marker_lifetime=0.2
+                        )
+                    
                     # Store last target pose for smoothing
                     last_target_pose = target_pose.copy()
                 
@@ -561,7 +577,7 @@ class VOTeleopController:
 
 def main(args):
     # Configure ROS node
-    rospy.init_node('vo_teleop_controller', anonymous=True, disable_signals=True)
+    rospy.init_node('vo_teleop_controller', anonymous=False, disable_signals=True)
     
     # Create controller and run
     controller = VOTeleopController(args)
