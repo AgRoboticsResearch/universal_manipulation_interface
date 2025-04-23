@@ -513,7 +513,8 @@ class VOTeleopController:
                     
                     # Schedule waypoint with the controller
                     # Add a small delay for stability
-                    self.controller.schedule_waypoint(target_pose, time.time() + 0.1)
+                    delay = 0.5
+                    self.controller.schedule_waypoint(target_pose, time.time() + delay)
                     
                     # Publish target pose for visualization
                     marker_array = MarkerArray()

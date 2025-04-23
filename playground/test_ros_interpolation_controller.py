@@ -268,11 +268,27 @@ def main(args):
 
     # Use 10 poses for testing
     # poses = np.asarray([[0.3, 0, 0.5, 0, 0, 0]])
-    poses = poses[:100]
-    timestamps = timestamps[:100]
+    poses = poses[:90]
+    timestamps = timestamps[:90]
     print(f"Using {len(poses)} poses for testing")
     print(f"Poses: {poses}")
     print(f"Timestamps: {timestamps}")
+
+    # repeat the poses back and forth for 10 times
+    print("Repeating poses back and forth for 10 times...")
+    whole_poses = poses.copy()
+    whole_timestamps = timestamps.copy()
+    for i in range(10):
+        current_pose = poses.copy() if i % 2 == 0 else poses[::-1]
+        whole_poses = np.concatenate((whole_poses, current_pose), axis=0)
+        whole_timestamps = np.concatenate((whole_timestamps, timestamps + (i + 1) * 9), axis=0)
+    poses = whole_poses
+    timestamps = whole_timestamps
+    print(f"Poses: {poses}")
+    print(f"Timestamps: {timestamps}")
+
+    
+
 
 
     # Initialize the controller
