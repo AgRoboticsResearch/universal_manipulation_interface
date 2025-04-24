@@ -495,6 +495,30 @@ class ROSInterpolationController:
                 loop_start_time = time.monotonic()
                 cycle_t_now = time.time()  # Wall clock time for debug prints
                 
+                # Check if command queue is empty and pose_interp has finished
+                t_now = time.monotonic()
+                interp_finished = False
+                if hasattr(pose_interp, 'times') and len(pose_interp.times) > 0:
+                    interp_finished = t_now > pose_interp.times[-1]
+                if self.command_queue.empty() and interp_finished:
+                    rospy.loginfo_throttle(10, "Both command queue and trajectory finished, skipping goal sending")
+                    # Both queue is empty and trajectory finished, skip sending goal
+                    loop_duration = time.monotonic() - loop_start_time
+                    if loop_duration > dt:
+                        if self.debug:
+                            print(f"WARNING: Loop took {loop_duration:.6f}s, exceeding dt={dt:.6f}s by {loop_duration-dt:.6f}s")
+                    t_wait_until = t_start + (iter_idx + 1) * dt
+                    precise_wait(t_wait_until, time_func=time.monotonic)
+                    total_cycle_time = time.monotonic() - loop_start_time
+                    if iter_idx == 0:
+                        self.ready_event.set()
+                    iter_idx += 1
+                    if self.verbose and iter_idx % 100 == 0:
+                        actual_freq = 1/total_cycle_time if total_cycle_time > 0 else float('inf')
+                        if self.debug:
+                            print(f"DEBUG: Cycle {iter_idx}: Actual frequency {actual_freq:.2f}Hz (target: {self.frequency:.2f}Hz)")
+                    continue
+                
                 # Process commands
                 try:
                     # Process at most one command per cycle to maintain frequency
@@ -767,6 +791,27 @@ class ROSInterpolationController:
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Exit context manager"""
         self.stop()
+
+    def move_to_joint_positions(self, joint_positions, duration=5.0):
+        """
+        Move the robot to the specified joint positions using a trajectory goal.
+        Parameters:
+        -----------
+        joint_positions: list or np.ndarray
+            Target joint positions (same order as self.joint_names)
+        duration: float
+            Time in seconds to reach the target joint positions
+        """
+        traj = JointTrajectory()
+        traj.joint_names = self.joint_names
+        point = JointTrajectoryPoint()
+        point.positions = list(joint_positions)
+        point.time_from_start = rospy.Duration(duration)
+        traj.points.append(point)
+        goal = FollowJointTrajectoryGoal()
+        goal.trajectory = traj
+        self.trajectory_client.send_goal(goal)
+        self.trajectory_client.wait_for_result()
 
 # Example usage:
 if __name__ == '__main__':

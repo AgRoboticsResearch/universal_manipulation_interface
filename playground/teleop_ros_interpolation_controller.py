@@ -463,29 +463,21 @@ class VOTeleopController:
             rospy.loginfo("Stopping camera following")
     
     def reset_to_home(self):
-        """Reset the robot to home position"""
-        # Stop following
+        """Reset the robot to home joint state"""
         self.follow_camera = False
-        rospy.loginfo("Reset arm pose and returning to home")
-        
-        # Move to home position - use a simple predefined pose
-        home_pose = np.array([0.3, 0.0, 0.4, 0.0, 0.0, 0.0])  # Example home position
-        
-        # Schedule the waypoint with a delay
-        self.controller.schedule_waypoint(home_pose, time.time() + self.args.delay)
-        
-        # Wait for movement to complete
+        rospy.loginfo("Reset arm pose and returning to home (joint state)")
+        # Example home joint state (update as needed)
+        home_joint_states = np.array([
+            -1.426289054506924e-05, 1.5749942064285278, -0.7059323787689209,
+            -0.8982672095298767, -3.4126722312066704e-05, 0.11976243555545807
+        ])
+        self.controller.move_to_joint_positions(home_joint_states, duration=5.0)
         rospy.sleep(self.args.delay + 1.0)
-        
-        # Reset origin and offset
         self.current_tcp_pose = self.controller.getActualTCPPose()
         self.origin_pose_matrix = pose_array_to_matrix(self.current_tcp_pose)
-        
-        # Reset camera offset if camera pose is available
         if self.camera_pose_msg is not None:
             camera_pose_matrix = pose_msg_to_matrix(self.camera_pose_msg)
             self.camera_pose_offset_matrix = np.linalg.inv(camera_pose_matrix)
-            
         rospy.loginfo("Reset complete, arm's origin pose reset")
     
     def run(self):
