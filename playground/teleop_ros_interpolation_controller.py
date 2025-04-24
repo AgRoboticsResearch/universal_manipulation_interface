@@ -398,7 +398,8 @@ class VOTeleopController:
             frequency=self.args.frequency,
             max_pos_speed=self.args.max_pos_speed,
             max_rot_speed=self.args.max_rot_speed,
-            verbose=self.args.verbose
+            verbose=self.args.verbose,
+            debug=self.args.debug
         )
         
         # Start the controller
@@ -513,8 +514,9 @@ class VOTeleopController:
                     
                     # Schedule waypoint with the controller
                     # Add a small delay for stability
-                    delay = 1
-                    self.controller.schedule_waypoint(target_pose, time.time() + delay)
+                    if self.args.debug:
+                        print(f"DEBUG: Scheduling waypoint at {time.time() + self.args.delay:.3f} (now={time.time():.3f})")
+                    self.controller.schedule_waypoint(target_pose, time.time() + self.args.delay)
                     
                     # Publish target pose for visualization
                     marker_array = MarkerArray()
@@ -553,6 +555,8 @@ class VOTeleopController:
                     if len(self.target_pose_buffer) > self.target_pose_buffer_size:
                         self.target_pose_buffer.pop(0)
                     if len(self.target_pose_buffer) > 1:
+                        if self.args.debug:
+                            print(f"DEBUG: Publishing trajectory markers with {len(self.target_pose_buffer)} waypoints")
                         publish_trajectory_markers(
                             np.array(self.target_pose_buffer),
                             self.traj_viz_pub,
@@ -601,9 +605,9 @@ if __name__ == "__main__":
                         help='Joint trajectory action server name')
     parser.add_argument('--frequency', type=float, default=30.0,
                         help='Control frequency (Hz)')
-    parser.add_argument('--max-pos-speed', type=float, default=0.25,
+    parser.add_argument('--max-pos-speed', type=float, default=0.3,
                         help='Maximum position speed (m/s)')
-    parser.add_argument('--max-rot-speed', type=float, default=0.16,
+    parser.add_argument('--max-rot-speed', type=float, default=0.7,
                         help='Maximum rotation speed (rad/s)')
     parser.add_argument('--delay', type=float, default=0.1,
                         help='Delay before starting trajectory (seconds)')
@@ -611,6 +615,8 @@ if __name__ == "__main__":
                         help='Smoothing factor for pose transitions (0-1, higher is smoother)')
     parser.add_argument('--verbose', action='store_true',
                         help='Enable verbose output')
+    parser.add_argument('--debug', action='store_true',
+                        help='Enable debug mode')
     
     args = parser.parse_args()
     main(args)

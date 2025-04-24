@@ -38,6 +38,7 @@ class ROSInterpolationController:
                  joints_init_speed=1.05,
                  soft_real_time=False,
                  verbose=False,
+                 debug=False,
                  receive_keys=None,
                  get_max_k=None,
                  receive_latency=0.0,
@@ -79,6 +80,8 @@ class ROSInterpolationController:
             Enable soft real-time scheduling (not fully implemented in ROS controller)
         verbose: bool
             Enable verbose logging
+        debug: bool
+            Enable debug print statements
         receive_keys: list
             Not used in ROS controller, added for API compatibility
         get_max_k: int
@@ -112,6 +115,7 @@ class ROSInterpolationController:
         self.joints_init_speed = joints_init_speed
         self.soft_real_time = soft_real_time
         self.verbose = verbose
+        self.debug = debug
         self.receive_latency = receive_latency
         self.group_name = group_name
         self.eef_link = eef_link
@@ -478,8 +482,9 @@ class ROSInterpolationController:
         )
         
         # Debug: Print initial state
-        print(f"DEBUG: Run loop started. dt={dt:.6f}s, frequency={self.frequency}Hz")
-        print(f"DEBUG: Initial pose_interp has {len(pose_interp.times)} points")
+        if self.debug:
+            print(f"DEBUG: Run loop started. dt={dt:.6f}s, frequency={self.frequency}Hz")
+            print(f"DEBUG: Initial pose_interp has {len(pose_interp.times)} points")
         
         last_command_time = time.time()
         command_count = 0
@@ -496,17 +501,20 @@ class ROSInterpolationController:
                     command = self.command_queue.get_nowait()
                     cmd = command['cmd']
                     command_count += 1
-                    print(f"DEBUG: Processing command #{command_count} of type {cmd} at {cycle_t_now:.6f}, {time.monotonic():.6f} (monotonic)")
+                    if self.debug:
+                        print(f"DEBUG: Processing command #{command_count} of type {cmd} at {cycle_t_now:.6f}, {time.monotonic():.6f} (monotonic)")
                     
                     if cmd == Command.STOP.value:
-                        print("DEBUG: Received STOP command")
+                        if self.debug:
+                            print("DEBUG: Received STOP command")
                         keep_running = False
                     elif cmd == Command.SERVOL.value:
                         target_pose = command['target_pose']
                         duration = float(command['duration'])
                         curr_time = time.monotonic() + dt
                         t_insert = curr_time + duration
-                        print(f"DEBUG: ServoL - curr_time={curr_time:.6f}, t_insert={t_insert:.6f}, duration={duration:.6f}")
+                        if self.debug:
+                            print(f"DEBUG: ServoL - curr_time={curr_time:.6f}, t_insert={t_insert:.6f}, duration={duration:.6f}")
                         pose_interp = pose_interp.drive_to_waypoint(
                             pose=target_pose,
                             time=t_insert,
@@ -526,8 +534,9 @@ class ROSInterpolationController:
                         curr_time = time.monotonic() + dt
                         
                         # Debug timings
-                        print(f"DEBUG: schedule_waypoint - wall target_time={target_time:.6f}, current wall={time.time():.6f}, delta={target_time-time.time():.6f}s")
-                        print(f"DEBUG: schedule_waypoint - mono_target_time={mono_target_time:.6f}, curr_time={curr_time:.6f}, delta={mono_target_time-curr_time:.6f}s")
+                        if self.debug:
+                            print(f"DEBUG: schedule_waypoint - wall target_time={target_time:.6f}, current wall={time.time():.6f}, delta={target_time-time.time():.6f}s")
+                            print(f"DEBUG: schedule_waypoint - mono_target_time={mono_target_time:.6f}, curr_time={curr_time:.6f}, delta={mono_target_time-curr_time:.6f}s")
                         
                         pose_interp = pose_interp.schedule_waypoint(
                             pose=target_pose,
@@ -537,7 +546,8 @@ class ROSInterpolationController:
                             curr_time=curr_time,
                             last_waypoint_time=last_waypoint_time
                         )
-                        print("pose_interp: ", len(pose_interp.poses))
+                        if self.debug:
+                            print("pose_interp: ", len(pose_interp.poses))
                         last_waypoint_time = mono_target_time
                         last_command_time = time.time()
                         
@@ -550,7 +560,8 @@ class ROSInterpolationController:
                 # Debug: Print timing info
                 if self.verbose or iter_idx % 100 == 0:
                     time_since_last_cmd = time.time() - last_command_time
-                    print(f"DEBUG: Time since last command: {time_since_last_cmd:.3f}s, Queue size: {self.command_queue.qsize()}")
+                    if self.debug:
+                        print(f"DEBUG: Time since last command: {time_since_last_cmd:.3f}s, Queue size: {self.command_queue.qsize()}")
                 
                 # Get interpolated pose for current time
                 cartesian_pose = pose_interp(t_now)
@@ -593,7 +604,8 @@ class ROSInterpolationController:
                     
                     # Debug: Print when sending IK
                     if self.verbose or iter_idx % 50 == 0:
-                        print(f"DEBUG: Sending IK solution at {time.time():.6f}: {joint_positions}")
+                        if self.debug:
+                            print(f"DEBUG: Sending IK solution at {time.time():.6f}: {joint_positions}")
                     
                     send_start = time.monotonic()
                     self.trajectory_client.send_goal_and_wait(goal, rospy.Duration(dt*0.5))
@@ -601,15 +613,18 @@ class ROSInterpolationController:
                     
                     # Debug: Print send duration if it's taking too long
                     if send_duration > dt * 0.5:
-                        print(f"WARNING: Goal send_and_wait took {send_duration:.6f}s, which is {(send_duration/dt)*100:.1f}% of dt={dt:.6f}s")
+                        if self.debug:
+                            print(f"WARNING: Goal send_and_wait took {send_duration:.6f}s, which is {(send_duration/dt)*100:.1f}% of dt={dt:.6f}s")
                 else:
                     if self.verbose or iter_idx % 10 == 0:
-                        print(f"DEBUG: IK failed for pose: {cartesian_pose}")
+                        if self.debug:
+                            print(f"DEBUG: IK failed for pose: {cartesian_pose}")
                 
                 # Calculate loop duration and sleep time
                 loop_duration = time.monotonic() - loop_start_time
                 if loop_duration > dt:
-                    print(f"WARNING: Loop took {loop_duration:.6f}s, exceeding dt={dt:.6f}s by {loop_duration-dt:.6f}s")
+                    if self.debug:
+                        print(f"WARNING: Loop took {loop_duration:.6f}s, exceeding dt={dt:.6f}s by {loop_duration-dt:.6f}s")
                 
                 # Regulate frequency 
                 t_wait_until = t_start + (iter_idx + 1) * dt
@@ -624,7 +639,8 @@ class ROSInterpolationController:
                 
                 if self.verbose and iter_idx % 100 == 0:  # Less frequent logging
                     actual_freq = 1/total_cycle_time if total_cycle_time > 0 else float('inf')
-                    print(f"DEBUG: Cycle {iter_idx}: Actual frequency {actual_freq:.2f}Hz (target: {self.frequency:.2f}Hz)")
+                    if self.debug:
+                        print(f"DEBUG: Cycle {iter_idx}: Actual frequency {actual_freq:.2f}Hz (target: {self.frequency:.2f}Hz)")
                     
             except Exception as e:
                 import traceback
