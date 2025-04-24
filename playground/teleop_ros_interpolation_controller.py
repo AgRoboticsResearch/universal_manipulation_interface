@@ -221,7 +221,7 @@ def publish_trajectory_markers(poses, publisher, frame_id="world", marker_lifeti
     
     # Publish the marker array
     publisher.publish(marker_array)
-    print(f"Published trajectory markers with {len(poses)} waypoints")
+    # print(f"Published trajectory markers with {len(poses)} waypoints")
 
 def pose_msg_to_matrix(pose_msg):
     """Convert a geometry_msgs/Pose to a 4x4 transformation matrix"""

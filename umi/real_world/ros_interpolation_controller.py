@@ -557,6 +557,9 @@ class ROSInterpolationController:
                 # Send trajectory commands
                 t_now = time.monotonic()
                 
+                # Set debug flag for the PoseTrajectoryInterpolator class
+                PoseTrajectoryInterpolator.debug = self.debug
+                
                 # Debug: Print timing info
                 if self.verbose or iter_idx % 100 == 0:
                     time_since_last_cmd = time.time() - last_command_time
