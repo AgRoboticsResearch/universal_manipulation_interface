@@ -21,7 +21,7 @@ register_codecs()
 
 # Dataset path
 DATASET_PATH = "/media/zfei/d/tempdata/umi/cup_in_the_wild/cup_in_the_wild.zarr.zip"
-
+SAVE_DATA = False
 def main():
     print(f"Loading dataset from {DATASET_PATH}")
     
@@ -120,56 +120,57 @@ def main():
         vis_dir = "/home/zfei/codes/unitree_ws/universal_manipulation_interface/visualization/cup_dataset_vis"
         os.makedirs(vis_dir, exist_ok=True)
         
-        # First, save all image frames as JPEG files
-        print(f"\nSaving all {end_idx - start_idx} frames as JPEG images...")
-        for i in range(end_idx - start_idx):
-            img = rgb_data[i]
-            if img.dtype != np.uint8:
-                img = (img * 255).astype(np.uint8)
-            
-            # Save the image as JPEG
-            cv2.imwrite(os.path.join(vis_dir, f"frame_{i:04d}.jpg"), cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
-            
-            # Print progress every 100 frames
-            if (i + 1) % 100 == 0:
-                print(f"  Saved {i+1}/{end_idx - start_idx} frames")
-        
-        # Save pose information as text file
-        print(f"\nSaving pose information to text file...")
-        pose_file = os.path.join(vis_dir, "episode_poses.txt")
-        with open(pose_file, 'w') as f:
-            f.write("frame_idx,pos_x,pos_y,pos_z,rot_x,rot_y,rot_z,gripper_width\n")
+        if SAVE_DATA:
+            # First, save all image frames as JPEG files
+            print(f"\nSaving all {end_idx - start_idx} frames as JPEG images...")
             for i in range(end_idx - start_idx):
-                pos = positions[i]
-                rot = rotations[i]
-                grip = gripper[i][0]  # Extract scalar from [1] array
-                f.write(f"{i},{pos[0]},{pos[1]},{pos[2]},{rot[0]},{rot[1]},{rot[2]},{grip}\n")
-        
-        # Also create a few visualization figures with pose information
-        print(f"\nCreating visualization figures with pose information...")
-        num_vis_frames = min(10, end_idx - start_idx)  # Show 10 frames or all if fewer
-        for i in range(num_vis_frames):
-            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+                img = rgb_data[i]
+                if img.dtype != np.uint8:
+                    img = (img * 255).astype(np.uint8)
+                
+                # Save the image as JPEG
+                cv2.imwrite(os.path.join(vis_dir, f"frame_{i:04d}.jpg"), cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
+                
+                # Print progress every 100 frames
+                if (i + 1) % 100 == 0:
+                    print(f"  Saved {i+1}/{end_idx - start_idx} frames")
             
-            # Display the image
-            img = rgb_data[i]
-            ax1.imshow(img)
-            ax1.set_title(f"Frame {start_idx + i}")
-            ax1.axis('off')
+            # Save pose information as text file
+            print(f"\nSaving pose information to text file...")
+            pose_file = os.path.join(vis_dir, "episode_poses.txt")
+            with open(pose_file, 'w') as f:
+                f.write("frame_idx,pos_x,pos_y,pos_z,rot_x,rot_y,rot_z,gripper_width\n")
+                for i in range(end_idx - start_idx):
+                    pos = positions[i]
+                    rot = rotations[i]
+                    grip = gripper[i][0]  # Extract scalar from [1] array
+                    f.write(f"{i},{pos[0]},{pos[1]},{pos[2]},{rot[0]},{rot[1]},{rot[2]},{grip}\n")
             
-            # Display robot state information
-            ax2.axis('off')
-            ax2.text(0.1, 0.7, f"Position: {positions[i]}", fontsize=12)
-            ax2.text(0.1, 0.6, f"Rotation: {rotations[i]}", fontsize=12)
-            ax2.text(0.1, 0.5, f"Gripper: {gripper[i]}", fontsize=12)
+            # Also create a few visualization figures with pose information
+            print(f"\nCreating visualization figures with pose information...")
+            num_vis_frames = min(10, end_idx - start_idx)  # Show 10 frames or all if fewer
+            for i in range(num_vis_frames):
+                fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+                
+                # Display the image
+                img = rgb_data[i]
+                ax1.imshow(img)
+                ax1.set_title(f"Frame {start_idx + i}")
+                ax1.axis('off')
+                
+                # Display robot state information
+                ax2.axis('off')
+                ax2.text(0.1, 0.7, f"Position: {positions[i]}", fontsize=12)
+                ax2.text(0.1, 0.6, f"Rotation: {rotations[i]}", fontsize=12)
+                ax2.text(0.1, 0.5, f"Gripper: {gripper[i]}", fontsize=12)
+                
+                # Save the figure
+                plt.tight_layout()
+                plt.savefig(os.path.join(vis_dir, f"vis_frame_{i:04d}.png"))
+                plt.close()
             
-            # Save the figure
-            plt.tight_layout()
-            plt.savefig(os.path.join(vis_dir, f"vis_frame_{i:04d}.png"))
-            plt.close()
-        
-        print(f"\nAll data saved to {vis_dir}/:")
-        
+            print(f"\nAll data saved to {vis_dir}/:")
+            
         # Sample access via the dataset interface (like during training)
         print("\nAccessing sample through dataset interface...")
         sample = dataset[0]  # Get first sample
