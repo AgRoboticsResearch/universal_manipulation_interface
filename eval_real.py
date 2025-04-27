@@ -10,7 +10,7 @@ Press SpaceMouse left button to enable rotation axes.
 
 Recording control:
 Click the opencv window (make sure it's in focus).
-Press "C" to start evaluation (hand control over to policy).
+Press "C" to start evaluation (hand co0ntrol over to policy).
 Press "Q" to exit program.
 
 ================ Policy in control ==============
