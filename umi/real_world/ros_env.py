@@ -159,7 +159,7 @@ class RosEnv:
             group_name=group_name,
             eef_link=eef_link,
             reference_frame=reference_frame,
-            debug=True
+            debug=False
         )
 
         self.frequency = frequency

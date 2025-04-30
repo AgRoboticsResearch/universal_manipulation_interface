@@ -414,7 +414,8 @@ class ROSInterpolationController:
             'target_time': target_time
         }
         self.command_queue.put(message)
-        print("DEBUG: Scheduled waypoint:", pose, "at time:", target_time)
+        if self.debug:
+            print("DEBUG: Scheduled waypoint:", pose, "at time:", target_time)
 
     def servoL(self, pose, duration=0.1):
         """

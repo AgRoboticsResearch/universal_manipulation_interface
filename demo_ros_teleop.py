@@ -210,13 +210,29 @@ def main(output, camera_topic, joint_names, group_name, eef_link, traj_action_na
                             env.drop_episode()
                             recording = False
                             key_counter.clear()
-                
+
+                # --- Reset to home when SpaceMouse button 1 pressed ---
+                # Home joint state (update as needed)
+                home_joint_state = np.array([
+                    -1.426289054506924e-05, 1.5749942064285278, -0.7059323787689209,
+                    -0.8982672095298767, -3.4126722312066704e-05, 0.11976243555545807
+                ])
+                if sm.is_button_pressed(1):
+                    print("Resetting arm to home position...")
+                    env.robot.move_to_joint_positions(home_joint_state, duration=5.0)
+                    time.sleep(delay + 1.0)
+                    # Update target_pose to new TCP pose
+                    state = env.get_robot_state()
+                    target_pose = state['ActualTCPPose'].copy()
+                    print("Reset complete.")
+                    continue  # Skip rest of loop this cycle
+
                 # Wait until the right time to sample the SpaceMouse state
                 precise_wait(t_sample)
                 
                 # Get teleop command from SpaceMouse
                 sm_state = sm.get_motion_state_transformed()
-                print(f"DEBUG: SpaceMouse state: {sm_state}")
+                # print(f"DEBUG: SpaceMouse state: {sm_state}")
                 dpos = sm_state[:3] * (0.5 / frequency)
                 drot_xyz = sm_state[3:] * (1.5 / frequency)
                 
@@ -224,7 +240,7 @@ def main(output, camera_topic, joint_names, group_name, eef_link, traj_action_na
                 drot = st.Rotation.from_euler('xyz', drot_xyz)
                 target_pose[:3] += dpos
                 target_pose[3:] = (drot * st.Rotation.from_rotvec(target_pose[3:])).as_rotvec()
-                print(f"DEBUG: Target pose: {target_pose}")
+                # print(f"DEBUG: Target pose: {target_pose}")
                 
                 # Avoid collision with the table
                 solve_table_collision(
@@ -232,7 +248,7 @@ def main(output, camera_topic, joint_names, group_name, eef_link, traj_action_na
                     gripper_width=gripper_target_pos,
                     height_threshold=height_threshold
                 )
-                print(f"DEBUG: Target pose after collision avoid: {target_pose}")
+                # print(f"DEBUG: Target pose after collision avoid: {target_pose}")
 
                 # Publish target pose for RViz visualization
                 env.publish_target_pose(target_pose)
