@@ -6,9 +6,17 @@ import shutil
 import math
 import cv2
 import rospy
+# Add scipy import
+import scipy.spatial.transform as st
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
 from multiprocessing.managers import SharedMemoryManager
+import threading
+# Add imports for visualization
+from visualization_msgs.msg import Marker, MarkerArray # Import MarkerArray
+from geometry_msgs.msg import Pose, Point, Quaternion
+from std_msgs.msg import Header, ColorRGBA
+from rospy import Duration
 from umi.real_world.ros_interpolation_controller import ROSInterpolationController
 from diffusion_policy.common.timestamp_accumulator import (
     TimestampActionAccumulator,
@@ -74,7 +82,8 @@ class RosEnv:
             camera_fps=30,
             video_bit_rate=3000*1000,
             # shared memory
-            shm_manager=None
+            shm_manager=None,
+            require_camera=True
             ):
         output_dir = pathlib.Path(output_dir)
         assert output_dir.parent.is_dir()
@@ -92,21 +101,35 @@ class RosEnv:
         if not rospy.get_node_uri():
             rospy.init_node('ros_env', anonymous=True, disable_signals=True)
             
-        # Setup image subscriber
-        self.bridge = CvBridge()
-        self.last_camera_data = None
-        self.camera_buffer = {
-            'color': [],
-            'timestamp': []
-        }
-        self.camera_buffer_lock = rospy.Lock()
-        self.camera_sub = rospy.Subscriber(
-            camera_topic, 
-            Image, 
-            self.camera_callback,
-            queue_size=1
-        )
-        rospy.loginfo(f"Subscribing to camera topic: {camera_topic}")
+        self.require_camera = require_camera
+
+        # Add target pose publisher for RViz visualization (using MarkerArray and latch=True)
+        self.target_pose_pub = rospy.Publisher('/rviz/target_pose', MarkerArray, queue_size=1, latch=True)
+        self._marker_id_counter = 0 # To give unique IDs to markers
+
+        if self.require_camera:
+            # Setup image subscriber
+            self.bridge = CvBridge()
+            self.last_camera_data = None
+            self.camera_buffer = {
+                'color': [],
+                'timestamp': []
+            }
+            self.camera_buffer_lock = threading.Lock()
+            self.camera_sub = rospy.Subscriber(
+                camera_topic, 
+                Image, 
+                self.camera_callback,
+                queue_size=1
+            )
+            rospy.loginfo(f"Subscribing to camera topic: {camera_topic}")
+        else:
+            self.bridge = None
+            self.last_camera_data = None
+            self.camera_buffer = {'color': [], 'timestamp': []}
+            self.camera_buffer_lock = threading.Lock()
+            self.camera_sub = None
+            self._ready = True
         
         # Setup video recorder
         self.video_recorder = VideoRecorder.create_hevc_nvenc(
@@ -135,7 +158,8 @@ class RosEnv:
             receive_latency=robot_obs_latency,
             group_name=group_name,
             eef_link=eef_link,
-            reference_frame=reference_frame
+            reference_frame=reference_frame,
+            debug=True
         )
 
         self.frequency = frequency
@@ -230,6 +254,8 @@ class RosEnv:
     # ======== start-stop API =============
     @property
     def is_ready(self):
+        if not self.require_camera:
+            return self.robot.is_ready
         return self._ready and self.robot.is_ready
     
     def start(self, wait=True):
@@ -248,6 +274,9 @@ class RosEnv:
 
     def start_wait(self):
         self.robot.start_wait()
+        if not self.require_camera:
+            self._ready = True
+            return
         # Wait for camera data to be available
         timeout = 5.0  # 5 seconds timeout
         start_time = time.time()
@@ -280,7 +309,25 @@ class RosEnv:
         'current' time is the last timestamp of camera
         All low-dim observations, interpolate with respect to 'current' time
         """
-        assert self.is_ready
+        if self.require_camera:
+            assert self.is_ready
+
+        if not self.require_camera:
+            # Only return robot state, no camera
+            last_robot_data = self.robot.get_all_state()
+            dt = 1 / self.frequency
+            robot_obs_timestamps = time.time() - (
+                np.arange(self.robot_obs_horizon)[::-1] * self.robot_down_sample_steps * dt)
+            robot_pose_interpolator = PoseInterpolator(
+                t=np.array(last_robot_data['robot_timestamp']), 
+                x=np.array(last_robot_data['ActualTCPPose']))
+            robot_pose = robot_pose_interpolator(robot_obs_timestamps)
+            robot_obs = {
+                'robot0_eef_pos': robot_pose[...,:3],
+                'robot0_eef_rot_axis_angle': robot_pose[...,3:],
+                'timestamp': robot_obs_timestamps
+            }
+            return robot_obs
 
         # get data from ROS camera topic
         with self.camera_buffer_lock:
@@ -361,7 +408,8 @@ class RosEnv:
             actions: np.ndarray, 
             timestamps: np.ndarray,
             compensate_latency=False):
-        assert self.is_ready
+        if self.require_camera:
+            assert self.is_ready
         if not isinstance(actions, np.ndarray):
             actions = np.array(actions)
         if not isinstance(timestamps, np.ndarray):
@@ -393,6 +441,48 @@ class RosEnv:
     def get_robot_state(self):
         return self.robot.get_state()
 
+    def publish_target_pose(self, pose_array):
+        """Publishes the target pose as an RViz marker within a MarkerArray."""
+        marker_array = MarkerArray()
+        
+        marker = Marker()
+        marker.header.frame_id = self.robot.reference_frame # Use the robot's reference frame
+        marker.header.stamp = rospy.Time.now()
+        marker.ns = "target_pose"
+        marker.id = 0 # Use a fixed ID for the single marker in the array
+        marker.type = Marker.ARROW
+        marker.action = Marker.ADD
+
+        # Set the pose of the marker
+        marker.pose.position.x = pose_array[0]
+        marker.pose.position.y = pose_array[1]
+        marker.pose.position.z = pose_array[2]
+        
+        # Convert axis-angle rotation to quaternion
+        rotation = st.Rotation.from_rotvec(pose_array[3:6])
+        quat = rotation.as_quat() # Returns (x, y, z, w)
+        marker.pose.orientation.x = quat[0]
+        marker.pose.orientation.y = quat[1]
+        marker.pose.orientation.z = quat[2]
+        marker.pose.orientation.w = quat[3]
+
+        # Set the scale of the marker (arrow dimensions)
+        marker.scale.x = 0.1  # Arrow length
+        marker.scale.y = 0.02 # Arrow width
+        marker.scale.z = 0.02 # Arrow height
+
+        # Set the color of the marker (RGBA)
+        marker.color.r = 0.0
+        marker.color.g = 1.0
+        marker.color.b = 0.0
+        marker.color.a = 0.8 # Alpha (transparency)
+
+        # Set the lifetime of the marker (Duration(0) means infinite if latched)
+        marker.lifetime = Duration(0) # Keep marker indefinitely since latch=True
+
+        marker_array.markers.append(marker)
+        self.target_pose_pub.publish(marker_array)
+
     # recording API
     def start_episode(self, start_time=None):
         "Start recording and return first obs"
@@ -400,7 +490,8 @@ class RosEnv:
             start_time = time.time()
         self.start_time = start_time
 
-        assert self.is_ready
+        if self.require_camera:
+            assert self.is_ready
 
         # prepare recording stuff
         episode_id = self.replay_buffer.n_episodes
@@ -434,8 +525,8 @@ class RosEnv:
         print(f'Episode {episode_id} started!')
     
     def end_episode(self):
-        "Stop recording"
-        assert self.is_ready
+        if self.require_camera:
+            assert self.is_ready
         
         # Stop video recording
         if self.video_recording:

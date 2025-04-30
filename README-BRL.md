@@ -77,7 +77,9 @@ Features:
 Usage:
 
 ```bash
-python demo_ros_teleop.py -o data_local/test_data --camera_topic /camera_ee_cam
+python demo_ros_teleop.py -o visualization/temp --camera_topic /camera_ee_cam 
+or 
+python demo_ros_teleop.py -o visualization/temp --no_camera
 ```
 
 Controls:

@@ -63,8 +63,10 @@ def solve_table_collision(ee_pose, gripper_width, height_threshold):
 @click.option('--frequency', '-f', default=10, type=float, help='Control frequency in Hz')
 @click.option('--command_latency', '-cl', default=0.01, type=float, help='Latency between receiving SpaceMouse command to executing on Robot in Sec')
 @click.option('--no_mirror', is_flag=True, default=False, help='Disable mirror in camera view')
+@click.option('--no_camera', is_flag=True, default=False, help='Run without camera visualization (for headless or no camera)')
+@click.option('--delay', default=0.1, type=float, help='Delay before executing scheduled waypoint (seconds)')
 def main(output, camera_topic, joint_names, group_name, eef_link, traj_action_name, 
-         vis_camera_idx, init_joints, frequency, command_latency, no_mirror):
+         vis_camera_idx, init_joints, frequency, command_latency, no_mirror, no_camera, delay):
     
     max_gripper_width = 0.09  # Maximum gripper width in meters
     gripper_speed = 0.2       # Gripper speed for manual control
@@ -99,12 +101,14 @@ def main(output, camera_topic, joint_names, group_name, eef_link, traj_action_na
                 # Video recording
                 camera_fps=30,
                 video_bit_rate=6000*1000,
-                shm_manager=shm_manager
+                shm_manager=shm_manager,
+                require_camera=not no_camera
              ) as env:
             
             cv2.setNumThreads(2)
-            print("Waiting for camera...")
-            time.sleep(1.0)
+            if not no_camera:
+                print("Waiting for camera...")
+                time.sleep(1.0)
             
             recording = False
             print("System ready! Human in control.")
@@ -120,64 +124,67 @@ def main(output, camera_topic, joint_names, group_name, eef_link, traj_action_na
                 # Calculate timing
                 t_cycle_end = t_start + (iter_idx + 1) * dt
                 t_sample = t_cycle_end - command_latency
-                t_command_target = t_cycle_end + dt
+                t_command_target = t_cycle_end + dt + delay  # Add delay to command target time
 
                 # Get observations
                 obs = env.get_obs()
                 
-                # Visualize
+                # Visualization (skip if no_camera or no image)
                 episode_id = env.replay_buffer.n_episodes
-                vis_img = obs['camera0_rgb'][-1]
-                
-                # Add status text with recording indicator
-                status = f'Episode: {episode_id}' + (' RECORDING' if recording else '')
-                cv2.putText(
-                    vis_img,
-                    status,
-                    (10, 20),
-                    fontFace=cv2.FONT_HERSHEY_SIMPLEX,
-                    fontScale=0.5,
-                    lineType=cv2.LINE_AA,
-                    thickness=3,
-                    color=(0, 0, 0)
-                )
-                cv2.putText(
-                    vis_img,
-                    status,
-                    (10, 20),
-                    fontFace=cv2.FONT_HERSHEY_SIMPLEX,
-                    fontScale=0.5,
-                    thickness=1,
-                    color=(255, 255, 255) if not recording else (0, 255, 0)
-                )
-                
-                # Show robot pose
-                pose_text = f'Pose: [{target_pose[0]:.3f}, {target_pose[1]:.3f}, {target_pose[2]:.3f}]'
-                cv2.putText(
-                    vis_img,
-                    pose_text,
-                    (10, 50),
-                    fontFace=cv2.FONT_HERSHEY_SIMPLEX,
-                    fontScale=0.5,
-                    thickness=1,
-                    color=(255, 255, 255)
-                )
-                
-                # Show gripper width
-                gripper_text = f'Gripper: {gripper_target_pos:.3f} m'
-                cv2.putText(
-                    vis_img,
-                    gripper_text,
-                    (10, 80),
-                    fontFace=cv2.FONT_HERSHEY_SIMPLEX,
-                    fontScale=0.5,
-                    thickness=1,
-                    color=(255, 255, 255)
-                )
-                
-                # Show the visualization
-                cv2.imshow('ROS Teleop', vis_img[...,::-1])  # RGB to BGR for cv2
-                _ = cv2.pollKey()
+                vis_img = None
+                if not no_camera:
+                    vis_img = obs.get('camera0_rgb', None)
+                    if vis_img is not None:
+                        vis_img = vis_img[-1]
+                        # Add status text with recording indicator
+                        status = f'Episode: {episode_id}' + (' RECORDING' if recording else '')
+                        cv2.putText(
+                            vis_img,
+                            status,
+                            (10, 20),
+                            fontFace=cv2.FONT_HERSHEY_SIMPLEX,
+                            fontScale=0.5,
+                            lineType=cv2.LINE_AA,
+                            thickness=3,
+                            color=(0, 0, 0)
+                        )
+                        cv2.putText(
+                            vis_img,
+                            status,
+                            (10, 20),
+                            fontFace=cv2.FONT_HERSHEY_SIMPLEX,
+                            fontScale=0.5,
+                            thickness=1,
+                            color=(255, 255, 255) if not recording else (0, 255, 0)
+                        )
+                        
+                        # Show robot pose
+                        pose_text = f'Pose: [{target_pose[0]:.3f}, {target_pose[1]:.3f}, {target_pose[2]:.3f}]'
+                        cv2.putText(
+                            vis_img,
+                            pose_text,
+                            (10, 50),
+                            fontFace=cv2.FONT_HERSHEY_SIMPLEX,
+                            fontScale=0.5,
+                            thickness=1,
+                            color=(255, 255, 255)
+                        )
+                        
+                        # Show gripper width
+                        gripper_text = f'Gripper: {gripper_target_pos:.3f} m'
+                        cv2.putText(
+                            vis_img,
+                            gripper_text,
+                            (10, 80),
+                            fontFace=cv2.FONT_HERSHEY_SIMPLEX,
+                            fontScale=0.5,
+                            thickness=1,
+                            color=(255, 255, 255)
+                        )
+                        
+                        # Show the visualization
+                        cv2.imshow('ROS Teleop', vis_img[...,::-1])  # RGB to BGR for cv2
+                        _ = cv2.pollKey()
                 
                 # Handle keyboard input
                 press_events = key_counter.get_press_events()
@@ -209,6 +216,7 @@ def main(output, camera_topic, joint_names, group_name, eef_link, traj_action_na
                 
                 # Get teleop command from SpaceMouse
                 sm_state = sm.get_motion_state_transformed()
+                print(f"DEBUG: SpaceMouse state: {sm_state}")
                 dpos = sm_state[:3] * (0.5 / frequency)
                 drot_xyz = sm_state[3:] * (1.5 / frequency)
                 
@@ -216,6 +224,7 @@ def main(output, camera_topic, joint_names, group_name, eef_link, traj_action_na
                 drot = st.Rotation.from_euler('xyz', drot_xyz)
                 target_pose[:3] += dpos
                 target_pose[3:] = (drot * st.Rotation.from_rotvec(target_pose[3:])).as_rotvec()
+                print(f"DEBUG: Target pose: {target_pose}")
                 
                 # Avoid collision with the table
                 solve_table_collision(
@@ -223,7 +232,11 @@ def main(output, camera_topic, joint_names, group_name, eef_link, traj_action_na
                     gripper_width=gripper_target_pos,
                     height_threshold=height_threshold
                 )
-                
+                print(f"DEBUG: Target pose after collision avoid: {target_pose}")
+
+                # Publish target pose for RViz visualization
+                env.publish_target_pose(target_pose)
+
                 # Handle gripper control
                 dpos = 0
                 if sm.is_button_pressed(0):
