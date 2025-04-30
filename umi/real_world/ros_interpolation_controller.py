@@ -15,6 +15,9 @@ from moveit_msgs.srv import GetPositionIK, GetPositionIKRequest
 from moveit_msgs.srv import GetPositionFK, GetPositionFKRequest
 from umi.common.pose_trajectory_interpolator import PoseTrajectoryInterpolator
 from diffusion_policy.common.precise_sleep import precise_wait
+# Import RViz visualization markers
+from visualization_msgs.msg import Marker, MarkerArray
+from std_msgs.msg import ColorRGBA
 
 class Command(enum.Enum):
     STOP = 0
@@ -163,6 +166,10 @@ class ROSInterpolationController:
         # TF listener for potential transformations
         self.tf_buffer = tf2_ros.Buffer(rospy.Duration(10.0))
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer)
+        
+        # Initialize visualization markers publisher for RViz
+        self.target_pose_pub = rospy.Publisher('/rviz/target_pose', MarkerArray, queue_size=1)
+        self.marker_id = 0
 
     def _initialize_kinematics(self):
         """Initialize the IK and FK service connections"""
@@ -212,6 +219,9 @@ class ROSInterpolationController:
             
         tic = time.time()
         
+        # ADDED: Visualize the target pose in RViz
+        self.publish_target_pose_marker(target_pose)
+        
         # Prepare the service request
         ik_request = GetPositionIKRequest()
         ik_request.ik_request.group_name = self.group_name
@@ -245,10 +255,17 @@ class ROSInterpolationController:
                     rospy.loginfo(f"IK computed successfully: {joint_positions}")
             else:
                 rospy.logwarn(f"IK computation failed with error code: {response.error_code.val}")
+                # ADDED: Update the marker color to red to indicate failure
+                self.update_marker_color(False)
         except rospy.ServiceException as e:
             rospy.logerr(f"Service call failed: {e}")
             
         computation_time = time.time() - tic
+        
+        # ADDED: Update marker color based on success
+        if success:
+            self.update_marker_color(True)
+            
         return success, joint_positions, computation_time
 
     def compute_fk(self, joint_positions):
@@ -794,6 +811,27 @@ class ROSInterpolationController:
         """Exit context manager"""
         self.stop()
 
+    def clear_command_queue(self):
+        """
+        Clear all pending commands from the command queue.
+        
+        Returns:
+        --------
+        cleared_count: int
+            Number of commands that were cleared
+        """
+        cleared_count = 0
+        try:
+            while not self.command_queue.empty():
+                self.command_queue.get(block=False)
+                cleared_count += 1
+            if cleared_count > 0:
+                rospy.loginfo(f"Cleared {cleared_count} commands from queue.")
+            return cleared_count
+        except Exception as e:
+            rospy.logwarn(f"Could not clear command queue: {e}")
+            return 0
+
     def move_to_joint_positions(self, joint_positions, duration=5.0):
         """
         Move the robot to the specified joint positions using a trajectory goal.
@@ -814,6 +852,138 @@ class ROSInterpolationController:
         goal.trajectory = traj
         self.trajectory_client.send_goal(goal)
         self.trajectory_client.wait_for_result()
+
+    def publish_target_pose_marker(self, pose):
+        """
+        Publish a visualization marker for the target pose
+        
+        Parameters:
+        -----------
+        pose: geometry_msgs.msg.Pose
+            The pose to visualize
+        """
+        marker_array = MarkerArray()
+        
+        # Create position marker (sphere)
+        position_marker = Marker()
+        position_marker.header.frame_id = self.reference_frame
+        position_marker.header.stamp = rospy.Time.now()
+        position_marker.ns = "target_pose"
+        position_marker.id = self.marker_id
+        position_marker.type = Marker.SPHERE
+        position_marker.action = Marker.ADD
+        position_marker.pose = pose
+        position_marker.scale.x = 0.05
+        position_marker.scale.y = 0.05
+        position_marker.scale.z = 0.05
+        position_marker.color = ColorRGBA(1.0, 1.0, 0.0, 0.8)  # Yellow by default
+        position_marker.lifetime = rospy.Duration(0.5)  # Short lifetime
+        
+        # Create orientation marker (arrow)
+        orientation_marker = Marker()
+        orientation_marker.header.frame_id = self.reference_frame
+        orientation_marker.header.stamp = rospy.Time.now()
+        orientation_marker.ns = "target_pose"
+        orientation_marker.id = self.marker_id + 1
+        orientation_marker.type = Marker.ARROW
+        orientation_marker.action = Marker.ADD
+        orientation_marker.pose = pose
+        orientation_marker.scale.x = 0.1  # Arrow length
+        orientation_marker.scale.y = 0.01  # Arrow width
+        orientation_marker.scale.z = 0.01  # Arrow height
+        orientation_marker.color = ColorRGBA(1.0, 1.0, 0.0, 0.8)  # Yellow by default
+        orientation_marker.lifetime = rospy.Duration(0.5)  # Short lifetime
+        
+        # Add markers to array
+        marker_array.markers.append(position_marker)
+        marker_array.markers.append(orientation_marker)
+        
+        # Publish markers
+        self.target_pose_pub.publish(marker_array)
+        self.marker_id = (self.marker_id + 2) % 1000  # Increment and keep under 1000
+        
+    def update_marker_color(self, success):
+        """
+        Update the marker color based on IK success
+        
+        Parameters:
+        -----------
+        success: bool
+            Whether the IK succeeded
+        """
+        marker_array = MarkerArray()
+        
+        # Create delete marker for previous ones
+        for i in range(self.marker_id - 2, self.marker_id):
+            if i < 0:
+                continue
+            delete_marker = Marker()
+            delete_marker.header.frame_id = self.reference_frame
+            delete_marker.header.stamp = rospy.Time.now()
+            delete_marker.ns = "target_pose"
+            delete_marker.id = i
+            delete_marker.action = Marker.DELETE
+            marker_array.markers.append(delete_marker)
+        
+        # Create new markers with updated color
+        color = ColorRGBA(0.0, 1.0, 0.0, 0.8) if success else ColorRGBA(1.0, 0.0, 0.0, 0.8)  # Green for success, red for failure
+        
+        # Get the last pose from state buffer
+        with self.state_buffer_lock:
+            if len(self.state_buffer['ActualTCPPose']) > 0:
+                pose_array = self.state_buffer['ActualTCPPose'][-1]
+                
+                # Convert to Pose
+                pose = Pose()
+                pose.position.x = pose_array[0]
+                pose.position.y = pose_array[1]
+                pose.position.z = pose_array[2]
+                
+                # Convert from Euler to quaternion
+                rotation = Rotation.from_euler('xyz', pose_array[3:6])
+                quat = rotation.as_quat()
+                pose.orientation.x = quat[0]
+                pose.orientation.y = quat[1]
+                pose.orientation.z = quat[2]
+                pose.orientation.w = quat[3]
+                
+                # Create position marker
+                position_marker = Marker()
+                position_marker.header.frame_id = self.reference_frame
+                position_marker.header.stamp = rospy.Time.now()
+                position_marker.ns = "target_pose_result"
+                position_marker.id = self.marker_id
+                position_marker.type = Marker.SPHERE
+                position_marker.action = Marker.ADD
+                position_marker.pose = pose
+                position_marker.scale.x = 0.05
+                position_marker.scale.y = 0.05
+                position_marker.scale.z = 0.05
+                position_marker.color = color
+                position_marker.lifetime = rospy.Duration(1.0)
+                
+                # Create orientation marker
+                orientation_marker = Marker()
+                orientation_marker.header.frame_id = self.reference_frame
+                orientation_marker.header.stamp = rospy.Time.now()
+                orientation_marker.ns = "target_pose_result"
+                orientation_marker.id = self.marker_id + 1
+                orientation_marker.type = Marker.ARROW
+                orientation_marker.action = Marker.ADD
+                orientation_marker.pose = pose
+                orientation_marker.scale.x = 0.1
+                orientation_marker.scale.y = 0.01
+                orientation_marker.scale.z = 0.01
+                orientation_marker.color = color
+                orientation_marker.lifetime = rospy.Duration(1.0)
+                
+                # Add markers to array
+                marker_array.markers.append(position_marker)
+                marker_array.markers.append(orientation_marker)
+                
+                # Publish markers
+                self.target_pose_pub.publish(marker_array)
+                self.marker_id = (self.marker_id + 2) % 1000
 
 # Example usage:
 if __name__ == '__main__':

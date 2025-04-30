@@ -51,6 +51,46 @@ def solve_table_collision(ee_pose, gripper_width, height_threshold):
     ee_pose[2] += delta
 
 
+def is_pose_reachable(env, target_pose, last_valid_pose, no_camera, vis_img):
+    """
+    Check if the target_pose is reachable using IK. If not, revert to last valid pose and provide feedback.
+    Returns (is_valid, new_target_pose, vis_img)
+    """
+    from geometry_msgs.msg import Pose
+    import scipy.spatial.transform as st
+    pose_msg = Pose()
+    pose_msg.position.x = target_pose[0]
+    pose_msg.position.y = target_pose[1]
+    pose_msg.position.z = target_pose[2]
+    rot = st.Rotation.from_rotvec(target_pose[3:])
+    quat = rot.as_quat()
+    pose_msg.orientation.x = quat[0]
+    pose_msg.orientation.y = quat[1]
+    pose_msg.orientation.z = quat[2]
+    pose_msg.orientation.w = quat[3]
+    ik_success, _, _ = env.robot.compute_ik(pose_msg)
+    if not ik_success:
+        print("[WARN] IK failed for target pose. Command ignored.")
+        if last_valid_pose is not None:
+            target_pose = last_valid_pose.copy()
+        # Optionally, show a warning in the visualization
+        if not no_camera and vis_img is not None:
+            import cv2
+            cv2.putText(
+                vis_img,
+                "IK FAILED! Command ignored.",
+                (10, 110),
+                fontFace=cv2.FONT_HERSHEY_SIMPLEX,
+                fontScale=0.7,
+                thickness=2,
+                color=(0, 0, 255)
+            )
+            cv2.imshow('ROS Teleop', vis_img[...,::-1])
+            cv2.waitKey(1)
+        return False, target_pose, vis_img
+    return True, target_pose, vis_img
+
+
 @click.command()
 @click.option('--output', '-o', required=True, help='Directory to save recording')
 @click.option('--camera_topic', default='/camera_ee_cam', help='ROS camera topic')
@@ -219,12 +259,26 @@ def main(output, camera_topic, joint_names, group_name, eef_link, traj_action_na
                 ])
                 if sm.is_button_pressed(1):
                     print("Resetting arm to home position...")
+                    
+                    # Clear any existing commands in the queue before reset
+                    cleared_count = env.robot.clear_command_queue()
+                    if cleared_count > 0:
+                        print(f"Cleared {cleared_count} pending commands before reset.")
+                    
+                    # Move to home position
                     env.robot.move_to_joint_positions(home_joint_state, duration=5.0)
-                    time.sleep(delay + 1.0)
-                    # Update target_pose to new TCP pose
+                    time.sleep(delay + 3.0)
+                    
+                    # Clear the command queue again after reset
+                    cleared_count = env.robot.clear_command_queue()
+                    if cleared_count > 0:
+                        print(f"Cleared {cleared_count} pending commands after reset.")
+                    
+                    # Use the robot's current state rather than FK
                     state = env.get_robot_state()
                     target_pose = state['ActualTCPPose'].copy()
-                    print("Reset complete.")
+                    main.last_valid_pose = target_pose.copy()  # Update last valid pose as well
+                    print("Reset complete, using robot's reported pose.")
                     continue  # Skip rest of loop this cycle
 
                 # Wait until the right time to sample the SpaceMouse state
@@ -252,6 +306,15 @@ def main(output, camera_topic, joint_names, group_name, eef_link, traj_action_na
 
                 # Publish target pose for RViz visualization
                 env.publish_target_pose(target_pose)
+
+                # --- IK validation and fallback ---
+                last_valid_pose = getattr(main, 'last_valid_pose', None)
+                ik_valid, target_pose, vis_img = is_pose_reachable(env, target_pose, last_valid_pose, no_camera, vis_img)
+                if not ik_valid:
+                    precise_wait(t_cycle_end)
+                    iter_idx += 1
+                    continue
+                main.last_valid_pose = target_pose.copy()
 
                 # Handle gripper control
                 dpos = 0
