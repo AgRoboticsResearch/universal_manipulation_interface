@@ -47,7 +47,8 @@ class ROSInterpolationController:
                  receive_latency=0.0,
                  group_name="manipulator",
                  eef_link="link06",
-                 reference_frame="link00"):
+                 reference_frame="link00",
+                 pose_interp_timeout=0.0):
         """
         ROS Interpolation Controller with interface compatible with RTDEInterpolationController
         
@@ -97,6 +98,8 @@ class ROSInterpolationController:
             End effector link name for IK/FK calculations
         reference_frame: str
             Reference frame for IK/FK calculations (default: 'link00')
+        pose_interp_timeout: float
+            Timeout in seconds for pose interpolator. If >0, will auto-reset pose interpolator if stale.
         """
         if joint_names is None:
             # Default joint names if none provided
@@ -123,6 +126,7 @@ class ROSInterpolationController:
         self.group_name = group_name
         self.eef_link = eef_link
         self.reference_frame = reference_frame
+        self.pose_interp_timeout = pose_interp_timeout
         
         # Initialize the maximum buffer size for state history
         self.max_buffer_size = 500
@@ -168,7 +172,7 @@ class ROSInterpolationController:
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer)
         
         # Initialize visualization markers publisher for RViz
-        self.target_pose_pub = rospy.Publisher('/rviz/target_pose', MarkerArray, queue_size=1)
+        self.target_pose_pub = rospy.Publisher('/rviz/target_pose_ros', MarkerArray, queue_size=1)
         self.marker_id = 0
 
     def _initialize_kinematics(self):
@@ -221,6 +225,7 @@ class ROSInterpolationController:
         
         # ADDED: Visualize the target pose in RViz
         self.publish_target_pose_marker(target_pose)
+        # print(f"DEBUG: Target pose for IK: {target_pose}")
         
         # Prepare the service request
         ik_request = GetPositionIKRequest()
@@ -263,8 +268,9 @@ class ROSInterpolationController:
         computation_time = time.time() - tic
         
         # ADDED: Update marker color based on success
-        if success:
-            self.update_marker_color(True)
+        # if success:
+        #     self.update_marker_color(True)
+        # print("Success:", success)
             
         return success, joint_positions, computation_time
 
@@ -468,6 +474,34 @@ class ROSInterpolationController:
                 current_pose = self.current_pose
             time.sleep(0.01)  # Wait for the pose to be updated
         return self.current_pose
+
+    def reset_pose_interpolator(self):
+        # Initialize pose interpolator
+        curr_pose = self.getActualTCPPose()  # Use the actual TCP pose
+        curr_t = time.monotonic()
+        last_waypoint_time = curr_t
+        pose_interp = PoseTrajectoryInterpolator(
+            times=[curr_t],
+            poses=[curr_pose])
+        # print("Reset Pose Initial pose_interp:", pose_interp)
+        # print("pose_interp.times:", pose_interp.times)
+        # print("pose_interp.poses:", pose_interp.poses)
+        rospy.logwarn("Pose interpolator reset")
+        return pose_interp, last_waypoint_time
+
+    def check_and_reset_pose_interp_timeout(self, pose_interp, last_waypoint_time, t_now):
+        """
+        Check if pose_interp is stale based on pose_interp_timeout. If so, reset it.
+        Returns (pose_interp, last_waypoint_time, was_reset: bool)
+        """
+        if self.pose_interp_timeout > 0 and hasattr(pose_interp, 'times') and len(pose_interp.times) > 0:
+            last_time = pose_interp.times[-1]
+            if t_now - last_time > self.pose_interp_timeout:
+                    # print(f"[pose_interp_timeout] t_now={t_now:.3f}, last_time={last_time:.3f}, diff={t_now-last_time:.3f} > timeout={self.pose_interp_timeout}")
+                rospy.logwarn(f"Pose interpolator timeout: {t_now - last_time:.3f}s > {self.pose_interp_timeout:.3f}s")
+                pose_interp, last_waypoint_time = self.reset_pose_interpolator()
+                return pose_interp, last_waypoint_time, True
+        return pose_interp, last_waypoint_time, False
             
     def run(self):
         """Main control loop"""
@@ -490,16 +524,10 @@ class ROSInterpolationController:
         dt = 1.0 / self.frequency
         t_start = time.monotonic()
         iter_idx = 0
+
+        pose_interp, last_waypoint_time = self.reset_pose_interpolator()
         
-        # Initialize pose interpolator
-        curr_pose = self.getActualTCPPose()  # Use the actual TCP pose
-        curr_t = time.monotonic()
-        last_waypoint_time = curr_t
-        pose_interp = PoseTrajectoryInterpolator(
-            times=[curr_t],
-            poses=[curr_pose]
-        )
-        
+
         # Debug: Print initial state
         if self.debug:
             print(f"DEBUG: Run loop started. dt={dt:.6f}s, frequency={self.frequency}Hz")
@@ -518,7 +546,12 @@ class ROSInterpolationController:
                 t_now = time.monotonic()
                 interp_finished = False
                 if hasattr(pose_interp, 'times') and len(pose_interp.times) > 0:
+                    
                     interp_finished = t_now > pose_interp.times[-1]
+
+                # --- pose_interp_timeout logic ---
+                pose_interp, last_waypoint_time, _ = self.check_and_reset_pose_interp_timeout(pose_interp, last_waypoint_time, t_now)
+
                 if self.command_queue.empty() and interp_finished:
                     rospy.loginfo_throttle(10, "Both command queue and trajectory finished, skipping goal sending")
                     # Both queue is empty and trajectory finished, skip sending goal
@@ -611,6 +644,10 @@ class ROSInterpolationController:
                 
                 # Get interpolated pose for current time
                 cartesian_pose = pose_interp(t_now)
+                if len(cartesian_pose) == 0:
+                    rospy.logwarn("No interpolated pose available, skipping this iteration")
+                    continue
+
                 if self.verbose:
                     rospy.loginfo(f"Interpolated pose: {cartesian_pose}")
                 
@@ -627,6 +664,9 @@ class ROSInterpolationController:
                 pose_msg.orientation.y = quat[1]
                 pose_msg.orientation.z = quat[2]
                 pose_msg.orientation.w = quat[3]
+                
+                # Publish the pose as a MarkerArray in RViz
+                # self.publish_target_pose_marker(pose_msg)
                 
                 # Compute IK for the pose
                 success, joint_positions, computation_time = self.compute_ik(pose_msg)
@@ -778,6 +818,8 @@ class ROSInterpolationController:
         """Stop the controller"""
         if self.running:
             self.running = False
+            # Clear any pending commands to prevent execution after stop
+            self.clear_command_queue()
             self.command_queue.put({'cmd': Command.STOP.value})
             if wait:
                 self.stop_wait()
@@ -863,13 +905,16 @@ class ROSInterpolationController:
             The pose to visualize
         """
         marker_array = MarkerArray()
-        
+        # Use fixed marker IDs for the current target pose
+        position_marker_id = 8888
+        orientation_marker_id = 8889
+
         # Create position marker (sphere)
         position_marker = Marker()
         position_marker.header.frame_id = self.reference_frame
         position_marker.header.stamp = rospy.Time.now()
         position_marker.ns = "target_pose"
-        position_marker.id = self.marker_id
+        position_marker.id = position_marker_id
         position_marker.type = Marker.SPHERE
         position_marker.action = Marker.ADD
         position_marker.pose = pose
@@ -877,14 +922,14 @@ class ROSInterpolationController:
         position_marker.scale.y = 0.05
         position_marker.scale.z = 0.05
         position_marker.color = ColorRGBA(1.0, 1.0, 0.0, 0.8)  # Yellow by default
-        position_marker.lifetime = rospy.Duration(0.5)  # Short lifetime
-        
+        position_marker.lifetime = rospy.Duration(0)  # 0 means forever
+
         # Create orientation marker (arrow)
         orientation_marker = Marker()
         orientation_marker.header.frame_id = self.reference_frame
         orientation_marker.header.stamp = rospy.Time.now()
         orientation_marker.ns = "target_pose"
-        orientation_marker.id = self.marker_id + 1
+        orientation_marker.id = orientation_marker_id
         orientation_marker.type = Marker.ARROW
         orientation_marker.action = Marker.ADD
         orientation_marker.pose = pose
@@ -892,31 +937,14 @@ class ROSInterpolationController:
         orientation_marker.scale.y = 0.01  # Arrow width
         orientation_marker.scale.z = 0.01  # Arrow height
         orientation_marker.color = ColorRGBA(1.0, 1.0, 0.0, 0.8)  # Yellow by default
-        orientation_marker.lifetime = rospy.Duration(0.5)  # Short lifetime
-        
+        orientation_marker.lifetime = rospy.Duration(1)
+
         # Add markers to array
         marker_array.markers.append(position_marker)
         marker_array.markers.append(orientation_marker)
-        
-        # Publish markers
-        self.target_pose_pub.publish(marker_array)
-        self.marker_id = (self.marker_id + 2) % 1000  # Increment and keep under 1000
-        
-    def update_marker_color(self, success):
-        """
-        Update the marker color based on IK success
-        
-        Parameters:
-        -----------
-        success: bool
-            Whether the IK succeeded
-        """
-        marker_array = MarkerArray()
-        
-        # Create delete marker for previous ones
-        for i in range(self.marker_id - 2, self.marker_id):
-            if i < 0:
-                continue
+
+        # Optionally, delete previous markers with same ID (not strictly needed, but safe)
+        for i in [position_marker_id, orientation_marker_id]:
             delete_marker = Marker()
             delete_marker.header.frame_id = self.reference_frame
             delete_marker.header.stamp = rospy.Time.now()
@@ -924,35 +952,47 @@ class ROSInterpolationController:
             delete_marker.id = i
             delete_marker.action = Marker.DELETE
             marker_array.markers.append(delete_marker)
-        
-        # Create new markers with updated color
-        color = ColorRGBA(0.0, 1.0, 0.0, 0.8) if success else ColorRGBA(1.0, 0.0, 0.0, 0.8)  # Green for success, red for failure
-        
+        # Add the new markers again (overwrite)
+        marker_array.markers.append(position_marker)
+        marker_array.markers.append(orientation_marker)
+
+        # Publish markers
+        self.target_pose_pub.publish(marker_array)
+
+    def update_marker_color(self, success):
+        """
+        Update the marker color based on IK success.
+        Only one marker is shown for result: green (success) or red (failure).
+        """
+        marker_array = MarkerArray()
+        color = ColorRGBA(0.0, 1.0, 0.0, 0.8) if success else ColorRGBA(1.0, 0.0, 0.0, 0.8)  # Green or red
+
+        # Use a fixed marker ID for result marker
+        marker_id = 9999
+
         # Get the last pose from state buffer
         with self.state_buffer_lock:
             if len(self.state_buffer['ActualTCPPose']) > 0:
                 pose_array = self.state_buffer['ActualTCPPose'][-1]
-                
+
                 # Convert to Pose
                 pose = Pose()
                 pose.position.x = pose_array[0]
                 pose.position.y = pose_array[1]
                 pose.position.z = pose_array[2]
-                
-                # Convert from Euler to quaternion
                 rotation = Rotation.from_euler('xyz', pose_array[3:6])
                 quat = rotation.as_quat()
                 pose.orientation.x = quat[0]
                 pose.orientation.y = quat[1]
                 pose.orientation.z = quat[2]
                 pose.orientation.w = quat[3]
-                
-                # Create position marker
+
+                # Position marker
                 position_marker = Marker()
                 position_marker.header.frame_id = self.reference_frame
                 position_marker.header.stamp = rospy.Time.now()
                 position_marker.ns = "target_pose_result"
-                position_marker.id = self.marker_id
+                position_marker.id = marker_id
                 position_marker.type = Marker.SPHERE
                 position_marker.action = Marker.ADD
                 position_marker.pose = pose
@@ -960,14 +1000,14 @@ class ROSInterpolationController:
                 position_marker.scale.y = 0.05
                 position_marker.scale.z = 0.05
                 position_marker.color = color
-                position_marker.lifetime = rospy.Duration(1.0)
-                
-                # Create orientation marker
+                position_marker.lifetime = rospy.Duration(1)  # 0 means forever
+
+                # Orientation marker
                 orientation_marker = Marker()
                 orientation_marker.header.frame_id = self.reference_frame
                 orientation_marker.header.stamp = rospy.Time.now()
                 orientation_marker.ns = "target_pose_result"
-                orientation_marker.id = self.marker_id + 1
+                orientation_marker.id = marker_id + 1
                 orientation_marker.type = Marker.ARROW
                 orientation_marker.action = Marker.ADD
                 orientation_marker.pose = pose
@@ -975,15 +1015,28 @@ class ROSInterpolationController:
                 orientation_marker.scale.y = 0.01
                 orientation_marker.scale.z = 0.01
                 orientation_marker.color = color
-                orientation_marker.lifetime = rospy.Duration(1.0)
-                
-                # Add markers to array
+                orientation_marker.lifetime = rospy.Duration(1)
+
                 marker_array.markers.append(position_marker)
                 marker_array.markers.append(orientation_marker)
-                
-                # Publish markers
+
+                # Optionally, delete previous markers with same ID (not strictly needed, but safe)
+                for i in [marker_id, marker_id + 1]:
+                    delete_marker = Marker()
+                    delete_marker.header.frame_id = self.reference_frame
+                    delete_marker.header.stamp = rospy.Time.now()
+                    delete_marker.ns = "target_pose_result"
+                    delete_marker.id = i
+                    delete_marker.action = Marker.DELETE
+                    marker_array.markers.append(delete_marker)
+
+                # Add the new markers again (overwrite)
+                if not success:
+                    print("IK failed, showing red marker")
+                marker_array.markers.append(position_marker)
+                marker_array.markers.append(orientation_marker)
+
                 self.target_pose_pub.publish(marker_array)
-                self.marker_id = (self.marker_id + 2) % 1000
 
 # Example usage:
 if __name__ == '__main__':

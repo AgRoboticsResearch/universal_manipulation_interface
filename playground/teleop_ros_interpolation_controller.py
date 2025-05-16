@@ -443,7 +443,8 @@ class VOTeleopController:
             max_pos_speed=self.args.max_pos_speed,
             max_rot_speed=self.args.max_rot_speed,
             verbose=self.args.verbose,
-            debug=self.args.debug
+            debug=self.args.debug,
+            pose_interp_timeout=2.0
         )
         
         # Start the controller
@@ -523,6 +524,8 @@ class VOTeleopController:
             camera_pose_matrix = pose_msg_to_matrix(self.camera_pose_msg)
             self.camera_pose_offset_matrix = np.linalg.inv(camera_pose_matrix)
         rospy.loginfo("Reset complete, arm's origin pose reset")
+        self.controller.reset_pose_interpolator()
+        
     
     def run(self):
         """Main control loop"""
