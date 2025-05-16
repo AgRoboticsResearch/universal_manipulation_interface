@@ -288,6 +288,50 @@ def calculate_target_pose(origin_pose_matrix, camera_pose_offset_matrix, camera_
     target_pose_matrix = origin_pose_matrix @ camera_pose_offset_matrix @ camera_pose_matrix
     return matrix_to_pose_array(target_pose_matrix)
 
+def create_target_pose_marker_array(target_pose, frame_id="world"):
+    """
+    Create a MarkerArray for visualizing the target pose as an arrow in RViz.
+    
+    Parameters:
+    -----------
+    target_pose: array-like
+        Target pose as [x, y, z, rx, ry, rz]
+    frame_id: str
+        Reference frame for visualization
+    
+    Returns:
+    --------
+    marker_array: MarkerArray
+        MarkerArray containing a single arrow marker for the target pose
+    """
+    marker_array = MarkerArray()
+    marker = Marker()
+    marker.header.frame_id = frame_id
+    marker.header.stamp = rospy.Time.now()
+    marker.ns = "target_pose"
+    marker.id = 0
+    marker.type = Marker.ARROW
+    marker.action = Marker.ADD
+    marker.scale.x = 0.05  # Shaft diameter
+    marker.scale.y = 0.01  # Head diameter
+    marker.scale.z = 0.01  # Head length
+    marker.color.r = 1.0
+    marker.color.g = 0.0
+    marker.color.b = 1.0
+    marker.color.a = 1.0
+    # Set position and orientation from target pose
+    marker.pose.position.x = target_pose[0]
+    marker.pose.position.y = target_pose[1]
+    marker.pose.position.z = target_pose[2]
+    # Convert euler angles to quaternion for the marker
+    quat = Rotation.from_euler('xyz', target_pose[3:]).as_quat()
+    marker.pose.orientation.x = quat[0]
+    marker.pose.orientation.y = quat[1]
+    marker.pose.orientation.z = quat[2]
+    marker.pose.orientation.w = quat[3]
+    marker_array.markers.append(marker)
+    return marker_array
+
 class VOTeleopController:
     """Visual Odometry Teleoperation Controller"""
     
@@ -511,35 +555,7 @@ class VOTeleopController:
                     self.controller.schedule_waypoint(target_pose, time.time() + self.args.delay)
                     
                     # Publish target pose for visualization
-                    marker_array = MarkerArray()
-                    marker = Marker()
-                    marker.header.frame_id = "world"
-                    marker.header.stamp = rospy.Time.now()
-                    marker.ns = "target_pose"
-                    marker.id = 0
-                    marker.type = Marker.ARROW
-                    marker.action = Marker.ADD
-                    marker.scale.x = 0.05  # Shaft diameter
-                    marker.scale.y = 0.01  # Head diameter
-                    marker.scale.z = 0.01  # Head length
-                    marker.color.r = 1.0
-                    marker.color.g = 0.0
-                    marker.color.b = 0.0
-                    marker.color.a = 1.0
-                    
-                    # Set position and orientation from target pose
-                    marker.pose.position.x = target_pose[0]
-                    marker.pose.position.y = target_pose[1]
-                    marker.pose.position.z = target_pose[2]
-                    
-                    # Convert euler angles to quaternion for the marker
-                    quat = Rotation.from_euler('xyz', target_pose[3:]).as_quat()
-                    marker.pose.orientation.x = quat[0]
-                    marker.pose.orientation.y = quat[1]
-                    marker.pose.orientation.z = quat[2]
-                    marker.pose.orientation.w = quat[3]
-                    
-                    marker_array.markers.append(marker)
+                    marker_array = create_target_pose_marker_array(target_pose, frame_id="world")
                     self.target_pose_pub.publish(marker_array)
                     
                     # --- Moving window trajectory visualization ---
