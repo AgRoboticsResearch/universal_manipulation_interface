@@ -134,11 +134,21 @@ def main(input, output, img_pattern, out_res, compression_level):
     # Set all gripper widths to zero as specified
     gripper_widths = np.zeros((len(positions), 1), dtype=np.float32)
     
+    # Create demo_start_pose and demo_end_pose
+    # Use the first pose as the demo_start_pose and last pose as demo_end_pose
+    demo_start_pose = np.zeros((len(positions), 6), dtype=np.float32)
+    demo_start_pose[:] = np.concatenate([positions[0], rotations[0]])
+    
+    demo_end_pose = np.zeros((len(positions), 6), dtype=np.float32)
+    demo_end_pose[:] = np.concatenate([positions[-1], rotations[-1]])
+    
     # Prepare episode data
     episode_data = {
         'robot0_eef_pos': positions.astype(np.float32),
         'robot0_eef_rot_axis_angle': rotations.astype(np.float32),
         'robot0_gripper_width': gripper_widths.astype(np.float32),
+        'robot0_demo_start_pose': demo_start_pose.astype(np.float32),
+        'robot0_demo_end_pose': demo_end_pose.astype(np.float32),
         'timestamp': timestamps.astype(np.float64)
     }
     

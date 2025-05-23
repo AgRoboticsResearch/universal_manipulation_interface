@@ -8,24 +8,38 @@ import sys
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import argparse
 from mpl_toolkits.mplot3d import Axes3D
 from matplotlib.animation import FuncAnimation
 import matplotlib.animation as animation
 
-# Path to the pose data file
-POSE_FILE = "/home/zfei/codes/unitree_ws/universal_manipulation_interface/visualization/cup_dataset_vis/episode_poses.txt"
-# Path to save the visualization
-OUTPUT_DIR = "/home/zfei/codes/unitree_ws/universal_manipulation_interface/visualization/cup_dataset_vis"
+# Default paths (will be overridden by command line arguments if provided)
+DEFAULT_POSE_FILE = "/home/zfei/codes/unitree_ws/universal_manipulation_interface/visualization/cup_dataset_vis/episode_poses.txt"
+DEFAULT_OUTPUT_DIR = "/home/zfei/codes/unitree_ws/universal_manipulation_interface/visualization/cup_dataset_vis"
+
+def parse_args():
+    parser = argparse.ArgumentParser(description='Visualize episode poses in 3D space')
+    parser.add_argument('-i', '--input', type=str, default=DEFAULT_POSE_FILE,
+                        help='Path to the pose data file')
+    parser.add_argument('-o', '--output', type=str, default=DEFAULT_OUTPUT_DIR,
+                        help='Directory to save visualizations')
+    return parser.parse_args()
 
 def main():
+    args = parse_args()
+    
+    # Set paths from command line arguments
+    pose_file = args.input
+    output_dir = args.output
+    
     # Check if the pose file exists
-    if not os.path.exists(POSE_FILE):
-        print(f"Error: Pose file {POSE_FILE} not found. Run load_cup_dataset_example.py first.")
+    if not os.path.exists(pose_file):
+        print(f"Error: Pose file {pose_file} not found. Run load_cup_dataset_example.py first.")
         return
 
     # Load the pose data
-    print(f"Loading pose data from {POSE_FILE}...")
-    df = pd.read_csv(POSE_FILE)
+    print(f"Loading pose data from {pose_file}...")
+    df = pd.read_csv(pose_file)
     
     # Basic statistics
     num_frames = len(df)
@@ -91,7 +105,7 @@ def main():
     ax.set_box_aspect([1, 1, 1])
     
     # Save the figure
-    static_plot_path = os.path.join(OUTPUT_DIR, 'trajectory_3d.png')
+    static_plot_path = os.path.join(output_dir, 'trajectory_3d.png')
     plt.savefig(static_plot_path, dpi=300, bbox_inches='tight')
     print(f"Static plot saved to {static_plot_path}")
     
@@ -149,7 +163,7 @@ def main():
     )
     
     # Save the animation
-    animation_path = os.path.join(OUTPUT_DIR, 'trajectory_animation.mp4')
+    animation_path = os.path.join(output_dir, 'trajectory_animation.mp4')
     writer = animation.FFMpegWriter(fps=20, metadata=dict(artist='Me'), bitrate=1800)
     anim.save(animation_path, writer=writer)
     print(f"Animation saved to {animation_path}")
@@ -184,7 +198,7 @@ def main():
             ax1.axvline(x=idx, color='red', linestyle='--', alpha=0.5)
     
     plt.tight_layout()
-    time_series_path = os.path.join(OUTPUT_DIR, 'position_gripper_time_series.png')
+    time_series_path = os.path.join(output_dir, 'position_gripper_time_series.png')
     plt.savefig(time_series_path, dpi=300, bbox_inches='tight')
     print(f"Time series plots saved to {time_series_path}")
     

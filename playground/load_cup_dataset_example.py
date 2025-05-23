@@ -10,20 +10,46 @@ import matplotlib.pyplot as plt
 import zarr
 from tqdm import tqdm
 import cv2
+import argparse
 
 # Add the root directory to the path so we can import the necessary modules
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 from diffusion_policy.dataset.umi_dataset import UmiDataset
 from diffusion_policy.codecs.imagecodecs_numcodecs import register_codecs
 
-# Register codecs for zarr compression
-register_codecs()
+# Register codecs for zarr compression, suppress warnings
+import warnings
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    register_codecs()
 
-# Dataset path
-DATASET_PATH = "/media/zfei/d/tempdata/umi/cup_in_the_wild/cup_in_the_wild.zarr.zip"
-SAVE_DATA = False
+# Default paths (will be overridden by command line arguments if provided)
+DEFAULT_DATASET_PATH = "/media/zfei/d/tempdata/umi/cup_in_the_wild/cup_in_the_wild.zarr.zip"
+DEFAULT_VIS_DIR = "/home/zfei/codes/unitree_ws/universal_manipulation_interface/visualization/cup_dataset_vis"
+
+DEFAULT_SAVE_DATA = True
+
+def parse_args():
+    parser = argparse.ArgumentParser(description='Load and visualize the cup_in_the_wild dataset')
+    parser.add_argument('-i', '--input', type=str, default=DEFAULT_DATASET_PATH,
+                        help='Path to the dataset zarr file')
+    parser.add_argument('-o', '--output', type=str, default=DEFAULT_VIS_DIR,
+                        help='Directory to save visualizations')
+    parser.add_argument('--no-save', action='store_true',
+                        help='Do not save data to output directory')
+    return parser.parse_args()
+
 def main():
-    print(f"Loading dataset from {DATASET_PATH}")
+    args = parse_args()
+    
+    # Set paths from command line arguments
+    dataset_path = args.input
+    vis_dir = args.output
+    
+    # Set save data flag
+    SAVE_DATA = not args.no_save
+    
+    print(f"Loading dataset from {dataset_path}")
     
     # Define shape_meta for the UMI dataset (cup arrangement)
     shape_meta = {
@@ -76,7 +102,7 @@ def main():
 
     # First, let's directly examine the zarr structure to better understand the dataset
     print("Examining zarr structure...")
-    with zarr.ZipStore(DATASET_PATH, mode='r') as zip_store:
+    with zarr.ZipStore(dataset_path, mode='r') as zip_store:
         root = zarr.group(store=zip_store)
         
         # Print the structure of the zarr file
@@ -99,7 +125,7 @@ def main():
         print("\nLoading dataset using UmiDataset...")
         dataset = UmiDataset(
             shape_meta=shape_meta,
-            dataset_path=DATASET_PATH,
+            dataset_path=dataset_path,
             val_ratio=0.0,  # Don't split validation for this example
         )
         
@@ -117,8 +143,8 @@ def main():
         gripper = root['data/robot0_gripper_width'][start_idx:end_idx]
         
         # Create a directory to save visualizations
-        vis_dir = "/home/zfei/codes/unitree_ws/universal_manipulation_interface/visualization/cup_dataset_vis"
         os.makedirs(vis_dir, exist_ok=True)
+        print(f"Visualization directory: {vis_dir}")
         
         if SAVE_DATA:
             # First, save all image frames as JPEG files
