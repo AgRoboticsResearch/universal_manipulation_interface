@@ -27,7 +27,7 @@ def parse_args():
                         help='Directory to save visualizations')
     parser.add_argument('--type', type=str, choices=['episode', 'slam'], default='auto',
                         help='Type of data to visualize (episode or slam). Auto-detect if not specified.')
-    parser.add_argument('--optical-to-robot', action='store_true',
+    parser.add_argument('--optical-to-robot', action='store_true', default=True,
                         help='Convert optical frame poses (Z forward, X leftward) to robot frame poses (X forward, Z upward)')
     return parser.parse_args()
 

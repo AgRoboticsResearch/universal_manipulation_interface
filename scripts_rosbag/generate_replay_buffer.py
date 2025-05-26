@@ -19,6 +19,7 @@ import zarr
 from tqdm import tqdm
 import pathlib
 import click
+from scipy.spatial.transform import Rotation
 
 # Add the root directory to the path so we can import the necessary modules
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -55,7 +56,6 @@ def load_slam_trajectory(traj_path):
     rotation_matrices = traj[:, :, :3]  # [n, 3, 3]
     
     # Convert rotation matrices to axis-angle representation
-    from scipy.spatial.transform import Rotation
     rotations = []
     for rot_mat in rotation_matrices:
         r = Rotation.from_matrix(rot_mat)
@@ -64,6 +64,54 @@ def load_slam_trajectory(traj_path):
     rotations = np.array(rotations)  # [n, 3]
     
     return positions, rotations
+
+def convert_optical_to_robot_frame(positions, rotations):
+    """
+    Convert poses from optical frame to robot frame.
+    
+    Optical frame: Z forward, X leftward, Y downward
+    Robot frame: X forward, Z upward, Y leftward
+    
+    Transformation matrix:
+    R = [[0, 0, 1],   # Robot X = Optical Z
+         [-1, 0, 0],  # Robot Y = -Optical X  
+         [0, -1, 0]]  # Robot Z = -Optical Y
+    
+    Args:
+        positions: Array of position vectors [n, 3] in optical frame
+        rotations: Array of rotation vectors [n, 3] in optical frame (axis-angle)
+        
+    Returns:
+        positions_robot: Array of position vectors [n, 3] in robot frame
+        rotations_robot: Array of rotation vectors [n, 3] in robot frame (axis-angle)
+    """
+    # Transformation matrix from optical to robot frame
+    T_optical_to_robot = np.array([
+        [0, 0, 1],    # Robot X = Optical Z
+        [-1, 0, 0],   # Robot Y = -Optical X
+        [0, -1, 0]    # Robot Z = -Optical Y
+    ])
+    
+    # Transform positions
+    positions_robot = positions @ T_optical_to_robot.T
+    
+    # Transform rotations
+    rotations_robot = []
+    for rot_vec in rotations:
+        # Convert axis-angle to rotation matrix
+        r = Rotation.from_rotvec(rot_vec)
+        rot_mat_optical = r.as_matrix()
+        
+        # Transform rotation matrix: R_robot = T * R_optical * T^-1
+        rot_mat_robot = T_optical_to_robot @ rot_mat_optical @ T_optical_to_robot.T
+        
+        # Convert back to axis-angle
+        r_robot = Rotation.from_matrix(rot_mat_robot)
+        rotations_robot.append(r_robot.as_rotvec())
+    
+    rotations_robot = np.array(rotations_robot)
+    
+    return positions_robot, rotations_robot
 
 def load_timestamps(time_path):
     """Load timestamps from a text file."""
@@ -89,7 +137,8 @@ def load_images(img_dir, img_pattern="color_*.png"):
 @click.option('--img-pattern', default="color_*.png", help='Image filename pattern')
 @click.option('--out-res', type=str, default='224,224', help='Output image resolution "width,height"')
 @click.option('--compression-level', '-cl', default=99, type=int, help='Image compression level')
-def main(input, output, img_pattern, out_res, compression_level):
+@click.option('--optical-to-robot', default=True, type=bool, help='Convert optical frame poses (Z forward, X leftward) to robot frame poses (X forward, Z upward)')
+def main(input, output, img_pattern, out_res, compression_level, optical_to_robot):
     """Process ROS bag data into a zarr dataset."""
     input_dir = pathlib.Path(input)
     output_path = pathlib.Path(output)
@@ -105,6 +154,14 @@ def main(input, output, img_pattern, out_res, compression_level):
     traj_path = input_dir / "SLAM_traj.txt"
     positions, rotations = load_slam_trajectory(traj_path)
     print(f"Loaded trajectory with {len(positions)} poses")
+    
+    # Apply frame conversion if requested
+    if optical_to_robot:
+        print("Converting from optical frame to robot frame...")
+        positions, rotations = convert_optical_to_robot_frame(positions, rotations)
+        print("Using Robot Frame coordinate system")
+    else:
+        print("Using Optical Frame coordinate system")
     
     # Load timestamps
     time_path = input_dir / "times.txt"
