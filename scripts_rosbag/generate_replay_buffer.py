@@ -3,7 +3,7 @@
 Script to convert ROS bag data to a zarr dataset for use with the Universal Manipulation Interface.
 This script extracts data from ROS bag directories containing:
 - color_*.png: RGB images
-- SLAM_traj.txt: Robot pose data (3x4 transformation matrices)
+- CameraTrajectory.txt: Robot pose data (3x4 transformation matrices)
 - times.txt: Timestamps for the data
 
 The script creates a zarr dataset with the same structure as the ones created 
@@ -41,7 +41,7 @@ def load_slam_trajectory(traj_path):
     Load SLAM trajectory from a text file and convert to position and rotation.
     
     Args:
-        traj_path: Path to the SLAM_traj.txt file
+        traj_path: Path to the CameraTrajectory.txt file
         
     Returns:
         positions: Array of position vectors [n, 3]
@@ -151,9 +151,9 @@ def process_single_episode(input_dir, img_pattern, out_res, optical_to_robot):
     print(f"Processing episode: {input_dir}")
     
     # Load SLAM trajectory
-    traj_path = input_dir / "SLAM_traj.txt"
+    traj_path = input_dir / "CameraTrajectory.txt"
     if not traj_path.exists():
-        raise ValueError(f"SLAM_traj.txt not found in {input_dir}")
+        raise ValueError(f"CameraTrajectory.txt not found in {input_dir}")
     
     positions, rotations = load_slam_trajectory(traj_path)
     print(f"  Loaded trajectory with {len(positions)} poses")
