@@ -1,13 +1,16 @@
 #!/usr/bin/env python
 """
 Script to convert ROS bag data to a zarr dataset for use with the Universal Manipulation Interface.
-This script extracts data from a ROS bag directory containing:
+This script extracts data from ROS bag directories containing:
 - color_*.png: RGB images
 - SLAM_traj.txt: Robot pose data (3x4 transformation matrices)
 - times.txt: Timestamps for the data
 
 The script creates a zarr dataset with the same structure as the ones created 
 by the UMI data collection pipeline.
+
+The script now supports multiple input directories using glob patterns to create
+a single zarr file with multiple episodes.
 """
 
 import os
@@ -131,63 +134,57 @@ def load_images(img_dir, img_pattern="color_*.png"):
     img_paths = sorted(glob.glob(os.path.join(img_dir, img_pattern)))
     return img_paths
 
-@click.command()
-@click.option('--input', '-i', required=True, help='Path to the rosbag extract directory')
-@click.option('--output', '-o', required=True, help='Zarr output path')
-@click.option('--img-pattern', default="color_*.png", help='Image filename pattern')
-@click.option('--out-res', type=str, default='224,224', help='Output image resolution "width,height"')
-@click.option('--compression-level', '-cl', default=99, type=int, help='Image compression level')
-@click.option('--optical-to-robot', default=True, type=bool, help='Convert optical frame poses (Z forward, X leftward) to robot frame poses (X forward, Z upward)')
-def main(input, output, img_pattern, out_res, compression_level, optical_to_robot):
-    """Process ROS bag data into a zarr dataset."""
-    input_dir = pathlib.Path(input)
-    output_path = pathlib.Path(output)
+def process_single_episode(input_dir, img_pattern, out_res, optical_to_robot):
+    """
+    Process a single episode directory and return the episode data.
     
-    if not input_dir.exists():
-        raise ValueError(f"Input directory {input_dir} does not exist")
-    
-    # Parse output resolution
-    out_res = tuple(int(x) for x in out_res.split(','))
-    print(f"Output image resolution: {out_res}")
+    Args:
+        input_dir: Path to the episode directory
+        img_pattern: Pattern for image files
+        out_res: Output resolution tuple
+        optical_to_robot: Whether to convert from optical to robot frame
+        
+    Returns:
+        episode_data: Dictionary containing episode data
+        images: List of processed images
+    """
+    print(f"Processing episode: {input_dir}")
     
     # Load SLAM trajectory
     traj_path = input_dir / "SLAM_traj.txt"
+    if not traj_path.exists():
+        raise ValueError(f"SLAM_traj.txt not found in {input_dir}")
+    
     positions, rotations = load_slam_trajectory(traj_path)
-    print(f"Loaded trajectory with {len(positions)} poses")
+    print(f"  Loaded trajectory with {len(positions)} poses")
     
     # Apply frame conversion if requested
     if optical_to_robot:
-        print("Converting from optical frame to robot frame...")
         positions, rotations = convert_optical_to_robot_frame(positions, rotations)
-        print("Using Robot Frame coordinate system")
-    else:
-        print("Using Optical Frame coordinate system")
     
     # Load timestamps
     time_path = input_dir / "times.txt"
+    if not time_path.exists():
+        raise ValueError(f"times.txt not found in {input_dir}")
+    
     timestamps = load_timestamps(time_path)
-    print(f"Loaded {len(timestamps)} timestamps")
+    print(f"  Loaded {len(timestamps)} timestamps")
     
     # Load image paths
     img_paths = load_images(input_dir, img_pattern)
-    print(f"Found {len(img_paths)} images")
+    print(f"  Found {len(img_paths)} images")
     
     # Check that we have the same number of poses, timestamps, and images
     if not (len(positions) == len(timestamps) == len(img_paths)):
-        print(f"Warning: Mismatch in data sizes: positions={len(positions)}, timestamps={len(timestamps)}, images={len(img_paths)}")
+        print(f"  Warning: Mismatch in data sizes: positions={len(positions)}, timestamps={len(timestamps)}, images={len(img_paths)}")
         # Use the minimum length of all three
         min_len = min(len(positions), len(timestamps), len(img_paths))
         positions = positions[:min_len]
         rotations = rotations[:min_len]
         timestamps = timestamps[:min_len]
         img_paths = img_paths[:min_len]
-        print(f"Truncating to minimum length: {min_len}")
+        print(f"  Truncating to minimum length: {min_len}")
     
-    # Create an empty zarr replay buffer
-    out_replay_buffer = ReplayBuffer.create_empty_zarr(
-        storage=zarr.MemoryStore())
-    
-    # Create a single episode with all data
     # Set all gripper widths to zero as specified
     gripper_widths = np.zeros((len(positions), 1), dtype=np.float32)
     
@@ -209,23 +206,10 @@ def main(input, output, img_pattern, out_res, compression_level, optical_to_robo
         'timestamp': timestamps.astype(np.float64)
     }
     
-    # Add episode to replay buffer
-    out_replay_buffer.add_episode(data=episode_data, compressors=None)
-    
-    # Set up image dataset in the replay buffer
-    img_compressor = JpegXl(level=compression_level, numthreads=1)
-    name = 'camera0_rgb'
-    _ = out_replay_buffer.data.require_dataset(
-        name=name,
-        shape=(len(positions),) + out_res + (3,),
-        chunks=(1,) + out_res + (3,),
-        compressor=img_compressor,
-        dtype=np.uint8
-    )
-    img_array = out_replay_buffer.data[name]
-    
     # Process images
-    print("Processing images...")
+    print("  Processing images...")
+    images = []
+    
     # Get an image to determine input resolution
     sample_img = cv2.imread(img_paths[0])
     in_h, in_w = sample_img.shape[:2]
@@ -237,24 +221,118 @@ def main(input, output, img_pattern, out_res, compression_level, optical_to_robo
     )
     
     # Process each image
-    for i, img_path in enumerate(tqdm(img_paths)):
+    for img_path in tqdm(img_paths, desc="  Images"):
         # Read image
         img = cv2.imread(img_path)
         # Convert from BGR to RGB
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         # Resize
         img = resize_tf(img)
-        # Save to zarr
+        images.append(img)
+    
+    return episode_data, images
+
+@click.command()
+@click.option('--input', '-i', required=True, help='Path to the rosbag extract directory or glob pattern for multiple directories')
+@click.option('--output', '-o', required=True, help='Zarr output path')
+@click.option('--img-pattern', default="color_*.png", help='Image filename pattern')
+@click.option('--out-res', type=str, default='224,224', help='Output image resolution "width,height"')
+@click.option('--compression-level', '-cl', default=99, type=int, help='Image compression level')
+@click.option('--optical-to-robot', default=True, type=bool, help='Convert optical frame poses (Z forward, X leftward) to robot frame poses (X forward, Z upward)')
+def main(input, output, img_pattern, out_res, compression_level, optical_to_robot):
+    """Process ROS bag data into a zarr dataset."""
+    output_path = pathlib.Path(output)
+    
+    # Parse output resolution
+    out_res = tuple(int(x) for x in out_res.split(','))
+    print(f"Output image resolution: {out_res}")
+    
+    # Find all input directories matching the pattern
+    input_dirs = []
+    if '*' in input or '?' in input or '[' in input:
+        # Use glob to find matching directories
+        matched_paths = glob.glob(input)
+        for path in matched_paths:
+            if os.path.isdir(path):
+                input_dirs.append(pathlib.Path(path))
+        input_dirs.sort()  # Sort for consistent ordering
+    else:
+        # Single directory
+        input_path = pathlib.Path(input)
+        if not input_path.exists():
+            raise ValueError(f"Input directory {input_path} does not exist")
+        input_dirs = [input_path]
+    
+    if not input_dirs:
+        raise ValueError(f"No directories found matching pattern: {input}")
+    
+    print(f"Found {len(input_dirs)} directories to process:")
+    for dir_path in input_dirs:
+        print(f"  {dir_path}")
+    
+    # Apply frame conversion if requested
+    if optical_to_robot:
+        print("Converting from optical frame to robot frame...")
+        print("Using Robot Frame coordinate system")
+    else:
+        print("Using Optical Frame coordinate system")
+    
+    # Create an empty zarr replay buffer
+    out_replay_buffer = ReplayBuffer.create_empty_zarr(
+        storage=zarr.MemoryStore())
+    
+    # Process each episode directory
+    all_images = []
+    total_frames = 0
+    
+    for episode_idx, input_dir in enumerate(input_dirs):
+        print(f"\nProcessing episode {episode_idx + 1}/{len(input_dirs)}")
+        
+        try:
+            episode_data, images = process_single_episode(
+                input_dir, img_pattern, out_res, optical_to_robot)
+            
+            # Add episode to replay buffer
+            out_replay_buffer.add_episode(data=episode_data, compressors=None)
+            
+            # Store images for later processing
+            all_images.extend(images)
+            total_frames += len(images)
+            
+            print(f"  Added episode with {len(images)} frames")
+            
+        except Exception as e:
+            print(f"  Error processing {input_dir}: {e}")
+            continue
+    
+    if total_frames == 0:
+        raise ValueError("No valid episodes were processed")
+    
+    # Set up image dataset in the replay buffer
+    img_compressor = JpegXl(level=compression_level, numthreads=1)
+    name = 'camera0_rgb'
+    _ = out_replay_buffer.data.require_dataset(
+        name=name,
+        shape=(total_frames,) + out_res + (3,),
+        chunks=(1,) + out_res + (3,),
+        compressor=img_compressor,
+        dtype=np.uint8
+    )
+    img_array = out_replay_buffer.data[name]
+    
+    # Save all images to the dataset
+    print(f"\nSaving {total_frames} images to zarr dataset...")
+    for i, img in enumerate(tqdm(all_images, desc="Saving images")):
         img_array[i] = img
     
     # Save replay buffer to disk
-    print(f"Saving replay buffer to {output_path}")
+    print(f"\nSaving replay buffer to {output_path}")
     with zarr.ZipStore(str(output_path), mode='w') as zip_store:
         out_replay_buffer.save_to_store(
             store=zip_store
         )
     
-    print(f"Done! Saved {len(positions)} frames to {output_path}")
+    print(f"Done! Saved {len(input_dirs)} episodes with {total_frames} total frames to {output_path}")
 
 if __name__ == "__main__":
     main()
