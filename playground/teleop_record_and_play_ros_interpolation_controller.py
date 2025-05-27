@@ -17,9 +17,11 @@ import rospy
 import argparse
 from visualization_msgs.msg import Marker, MarkerArray
 from geometry_msgs.msg import Point, Pose, PoseStamped
+from nav_msgs.msg import Path
 import std_msgs.msg
 from sensor_msgs.msg import Joy
 from std_srvs.srv import Trigger, TriggerResponse
+import datetime
 umi_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 import sys
 sys.path.append(umi_path)
@@ -57,6 +59,81 @@ def load_poses_from_file(file_path):
     timestamps = frame_indices / 10.0  # 10Hz
     
     return poses, timestamps, gripper_widths
+
+def pose_array_to_pose_stamped(pose_array, frame_id="world", timestamp=None):
+    """Convert a pose array [x,y,z,rx,ry,rz] to a PoseStamped message"""
+    pose_stamped = PoseStamped()
+    pose_stamped.header.frame_id = frame_id
+    
+    # Handle timestamp conversion - if it's a float, convert to rospy.Time
+    if timestamp is not None:
+        if isinstance(timestamp, (int, float)):
+            pose_stamped.header.stamp = rospy.Time.from_sec(timestamp)
+        else:
+            pose_stamped.header.stamp = timestamp
+    else:
+        pose_stamped.header.stamp = rospy.Time.now()
+    pose_stamped.pose.position.x = pose_array[0]
+    pose_stamped.pose.position.y = pose_array[1]
+    pose_stamped.pose.position.z = pose_array[2]
+    
+    # Convert Euler angles to quaternion
+    quat = Rotation.from_euler('xyz', pose_array[3:]).as_quat()
+    pose_stamped.pose.orientation.x = quat[0]
+    pose_stamped.pose.orientation.y = quat[1]
+    pose_stamped.pose.orientation.z = quat[2]
+    pose_stamped.pose.orientation.w = quat[3]
+    
+    
+    return pose_stamped
+
+def trajectory_to_path_msg(trajectory, timestamps, frame_id="world"):
+    """Convert a list of pose arrays to a Path message"""
+    path_msg = Path()
+    path_msg.header.frame_id = frame_id
+    path_msg.header.stamp = rospy.Time.now()
+    
+    for i, pose_array in enumerate(trajectory):
+        # Use timestamp if available, otherwise use current time
+        timestamp = rospy.Time.from_sec(timestamps[i]) if i < len(timestamps) else rospy.Time.now()
+        pose_stamped = pose_array_to_pose_stamped(pose_array, frame_id, timestamp)
+        path_msg.poses.append(pose_stamped)
+    
+    return path_msg
+
+def save_trajectory_to_file(trajectory, timestamps, file_path, trajectory_name="trajectory"):
+    """
+    Save trajectory data to a text file
+    
+    Parameters:
+    -----------
+    trajectory: list of numpy arrays
+        List of pose arrays [x, y, z, rx, ry, rz]
+    timestamps: list of float
+        List of timestamps corresponding to each pose
+    file_path: str
+        Full path to save the file
+    trajectory_name: str
+        Name identifier for the trajectory
+    """
+    try:
+        # Create directory if it doesn't exist
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+        
+        with open(file_path, 'w') as f:
+            f.write(f"# {trajectory_name} trajectory data\n")
+            f.write("# Format: timestamp,x,y,z,rx,ry,rz\n")
+            
+            for i, pose in enumerate(trajectory):
+                timestamp = timestamps[i] if i < len(timestamps) else 0.0
+                f.write(f"{timestamp:.6f},{pose[0]:.6f},{pose[1]:.6f},{pose[2]:.6f},"
+                       f"{pose[3]:.6f},{pose[4]:.6f},{pose[5]:.6f}\n")
+        
+        rospy.loginfo(f"Saved {trajectory_name} trajectory to {file_path}")
+        return True
+    except Exception as e:
+        rospy.logerr(f"Failed to save {trajectory_name} trajectory: {e}")
+        return False
 
 def normalize_poses_to_current_tcp(poses, current_tcp_pose):
     """
@@ -361,6 +438,12 @@ class VOTeleopController:
         self.recorded_timestamps = []
         self.playback_start_time = None
         
+        # Thread-safe TCP pose tracking
+        self.cached_tcp_pose = None
+        self.tcp_pose_lock = threading.Lock()
+        self.tcp_pose_thread = None
+        self.tcp_pose_thread_running = False
+        
         # Initialize TF listener for coordinate transformations
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer)
@@ -370,9 +453,18 @@ class VOTeleopController:
         self.camera_T_optical_mat[:3, :3] = Rotation.from_quat([-0.5, 0.5, -0.5, 0.5]).as_matrix()
         self.optical_T_camera_mat = np.linalg.inv(self.camera_T_optical_mat)
         
+        # Trajectory tracking for playback analysis
+        self.target_trajectory = []
+        self.actual_trajectory = []
+        self.trajectory_timestamps = []
+        
         # Initialize publishers for visualization
         self.traj_viz_pub = rospy.Publisher('/trajectory_visualization', MarkerArray, queue_size=1, latch=True)
         self.target_pose_pub = rospy.Publisher('/rviz/target_pose', MarkerArray, queue_size=1, latch=True)
+        
+        # Initialize publishers for trajectory tracking (real-time pose comparison)
+        self.target_trajectory_pub = rospy.Publisher('/playback/target_trajectory', PoseStamped, queue_size=1)
+        self.actual_trajectory_pub = rospy.Publisher('/playback/actual_trajectory', PoseStamped, queue_size=1)
         
         # Initialize subscribers
         cam_pose_topic = args.camera_pose_topic if args.camera_pose_topic else "/orbslam3/camera_pose"
@@ -524,6 +616,9 @@ class VOTeleopController:
         self.current_tcp_pose = self.controller.getActualTCPPose()
         self.origin_pose_matrix = pose_array_to_matrix(self.current_tcp_pose)
         rospy.loginfo(f"Initial TCP pose: {self.current_tcp_pose}")
+        
+        # Start TCP pose reading thread for performance optimization
+        self.start_tcp_pose_thread()
     
     def camera_pose_callback(self, optical_pose_stamped_msg):
         """Callback for camera pose messages"""
@@ -640,6 +735,11 @@ class VOTeleopController:
             self.is_playing = True
             self.playback_start_time = time.time()
             
+            # Initialize trajectory tracking for this playback session
+            self.target_trajectory = []
+            self.actual_trajectory = []
+            self.trajectory_timestamps = []
+            
             # Publish trajectory visualization
             publish_trajectory_markers(
                 np.array(self.recorded_poses),
@@ -675,6 +775,43 @@ class VOTeleopController:
             self.camera_pose_offset_matrix = np.linalg.inv(camera_pose_matrix)
         rospy.loginfo("Reset complete, arm's origin pose reset")
         self.controller.reset_pose_interpolator()
+    
+    def save_playback_trajectories(self):
+        """Save target and actual trajectories from playback to files"""
+        if len(self.target_trajectory) == 0:
+            rospy.logwarn("No trajectory data to save")
+            return
+        
+        # Generate timestamp for unique filenames
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # Create directory for saving trajectories
+        save_dir = os.path.expanduser(self.args.trajectory_save_folder)
+        
+        # Define file paths
+        target_file = os.path.join(save_dir, f"target_trajectory_{timestamp}.txt")
+        actual_file = os.path.join(save_dir, f"actual_trajectory_{timestamp}.txt")
+        
+        # Save target trajectory
+        success_target = save_trajectory_to_file(
+            self.target_trajectory,
+            self.trajectory_timestamps,
+            target_file,
+            "target"
+        )
+        
+        # Save actual trajectory
+        success_actual = save_trajectory_to_file(
+            self.actual_trajectory,
+            self.trajectory_timestamps,
+            actual_file,
+            "actual"
+        )
+        
+        if success_target and success_actual:
+            rospy.loginfo(f"Successfully saved trajectories to {save_dir}")
+        else:
+            rospy.logerr("Failed to save one or more trajectory files")
         
     
     def run(self):
@@ -697,6 +834,11 @@ class VOTeleopController:
                         if elapsed_time > total_duration:
                             rospy.loginfo("Playback complete")
                             self.is_playing = False
+                            
+                            # Save trajectories if enabled
+                            if self.args.save_trajectories and len(self.target_trajectory) > 0:
+                                self.save_playback_trajectories()
+                            
                             continue
                     
                     # Find the appropriate pose to play based on elapsed time
@@ -736,6 +878,21 @@ class VOTeleopController:
                     
                     self.controller.schedule_waypoint(target_pose, time.time() + self.args.delay)
                     
+                    # Get actual robot pose for trajectory tracking (using cached pose from thread)
+                    current_actual_pose = self.get_cached_tcp_pose()
+                    current_time = time.time()
+                    
+                    # Store trajectory data
+                    self.target_trajectory.append(target_pose.copy())
+                    self.actual_trajectory.append(current_actual_pose.copy())
+                    self.trajectory_timestamps.append(current_time)
+                    
+                    # Publish current poses for real-time comparison in rqt
+                    target_pose_stamped = pose_array_to_pose_stamped(target_pose, frame_id="world", timestamp=current_time)
+                    actual_pose_stamped = pose_array_to_pose_stamped(current_actual_pose, frame_id="world", timestamp=current_time)
+                    self.target_trajectory_pub.publish(target_pose_stamped)
+                    self.actual_trajectory_pub.publish(actual_pose_stamped)
+                    
                     # Publish target pose for visualization
                     marker_array = create_target_pose_marker_array(target_pose, frame_id="world")
                     self.target_pose_pub.publish(marker_array)
@@ -761,10 +918,61 @@ class VOTeleopController:
         except Exception as e:
             rospy.logerr(f"Error in control loop: {e}")
         finally:
+            # Stop the TCP pose reading thread
+            rospy.loginfo("Stopping TCP pose reading thread...")
+            self.stop_tcp_pose_thread()
+            
             # Stop the controller
             rospy.loginfo("Stopping controller...")
             self.controller.stop(wait=True)
             rospy.loginfo("Controller stopped")
+    
+    def start_tcp_pose_thread(self):
+        """Start the TCP pose reading thread"""
+        if not self.tcp_pose_thread_running:
+            self.tcp_pose_thread_running = True
+            self.tcp_pose_thread = threading.Thread(target=self._tcp_pose_reader_thread)
+            self.tcp_pose_thread.daemon = True
+            self.tcp_pose_thread.start()
+            rospy.loginfo("TCP pose reading thread started")
+    
+    def stop_tcp_pose_thread(self):
+        """Stop the TCP pose reading thread"""
+        if self.tcp_pose_thread_running:
+            self.tcp_pose_thread_running = False
+            if self.tcp_pose_thread and self.tcp_pose_thread.is_alive():
+                self.tcp_pose_thread.join(timeout=1.0)
+            rospy.loginfo("TCP pose reading thread stopped")
+    
+    def _tcp_pose_reader_thread(self):
+        """Thread function that continuously reads TCP pose"""
+        rate = rospy.Rate(self.args.frequency)  # Same frequency as main loop
+        
+        while self.tcp_pose_thread_running and not rospy.is_shutdown():
+            try:
+                # Read current TCP pose
+                current_pose = self.controller.getActualTCPPose()
+                
+                # Update cached pose in thread-safe manner
+                with self.tcp_pose_lock:
+                    self.cached_tcp_pose = current_pose.copy()
+                    
+            except Exception as e:
+                rospy.logwarn(f"Error reading TCP pose in thread: {e}")
+                rospy.sleep(0.1)  # Brief sleep on error
+                continue
+            
+            rate.sleep()
+    
+    def get_cached_tcp_pose(self):
+        """Get the cached TCP pose in a thread-safe way"""
+        with self.tcp_pose_lock:
+            if self.cached_tcp_pose is not None:
+                return self.cached_tcp_pose.copy()
+            else:
+                # Fallback to direct call if no cached pose available
+                rospy.logwarn("No cached TCP pose available, falling back to direct call")
+                return self.controller.getActualTCPPose()
 
 def main(args):
     # Configure ROS node
@@ -799,6 +1007,10 @@ if __name__ == "__main__":
                         help='Delay before starting trajectory (seconds)')
     parser.add_argument('--smooth-factor', type=float, default=0,
                         help='Smoothing factor for pose transitions (0-1, higher is smoother)')
+    parser.add_argument('--save-trajectories', action='store_true',
+                        help='Save target and actual trajectories to files during playback')
+    parser.add_argument('--trajectory-save-folder', type=str, default='~/trajectory_data',
+                        help='Folder to save trajectory files (default: ~/trajectory_data)')
     parser.add_argument('--verbose', action='store_true',
                         help='Enable verbose output')
     parser.add_argument('--debug', action='store_true',
