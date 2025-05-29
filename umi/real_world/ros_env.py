@@ -8,7 +8,7 @@ import cv2
 import rospy
 # Add scipy import
 import scipy.spatial.transform as st
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import Image, CompressedImage
 from cv_bridge import CvBridge
 from multiprocessing.managers import SharedMemoryManager
 import threading
@@ -52,6 +52,7 @@ class RosEnv:
             eef_link="link06",
             reference_frame="link00",
             camera_topic="/camera_ee_cam",
+            use_compressed_image=False,
             # obs
             obs_image_resolution=(224,224),
             max_obs_buffer_size=60,
@@ -102,13 +103,14 @@ class RosEnv:
             rospy.init_node('ros_env', anonymous=True, disable_signals=True)
             
         self.require_camera = require_camera
+        self.use_compressed_image = use_compressed_image
 
         # Add target pose publisher for RViz visualization (using MarkerArray and latch=True)
         self.target_pose_pub = rospy.Publisher('/rviz/target_pose', MarkerArray, queue_size=1, latch=True)
         self._marker_id_counter = 0 # To give unique IDs to markers
 
         if self.require_camera:
-            # Setup image subscriber
+            # Setup image subscriber components but don't create subscriber yet
             self.bridge = CvBridge()
             self.last_camera_data = None
             self.camera_buffer = {
@@ -116,13 +118,8 @@ class RosEnv:
                 'timestamp': []
             }
             self.camera_buffer_lock = threading.Lock()
-            self.camera_sub = rospy.Subscriber(
-                camera_topic, 
-                Image, 
-                self.camera_callback,
-                queue_size=1
-            )
-            rospy.loginfo(f"Subscribing to camera topic: {camera_topic}")
+            # Store camera topic info for later subscriber creation
+            self.camera_topic = camera_topic
         else:
             self.bridge = None
             self.last_camera_data = None
@@ -194,13 +191,37 @@ class RosEnv:
 
         self.start_time = None
         self._ready = False
+        
+        # Now create the camera subscriber after all attributes are initialized
+        if self.require_camera:
+            # Choose the appropriate message type and subscriber based on use_compressed_image
+            if self.use_compressed_image:
+                self.camera_sub = rospy.Subscriber(
+                    self.camera_topic, 
+                    CompressedImage,
+                    self.camera_callback,
+                    queue_size=1
+                )
+                rospy.loginfo(f"Subscribing to compressed camera topic: {self.camera_topic}")
+            else:
+                self.camera_sub = rospy.Subscriber(
+                    self.camera_topic, 
+                    Image, 
+                    self.camera_callback,
+                    queue_size=1
+                )
+                rospy.loginfo(f"Subscribing to camera topic: {self.camera_topic}")
     
     def camera_callback(self, msg):
         """Callback for camera image messages"""
         try:
-            # Convert ROS image to OpenCV format
-            cv_image = self.bridge.imgmsg_to_cv2(msg, "bgr8")
+            # Convert ROS image to OpenCV format based on message type
+            if self.use_compressed_image:
+                cv_image = self.bridge.compressed_imgmsg_to_cv2(msg, "bgr8")
+            else:
+                cv_image = self.bridge.imgmsg_to_cv2(msg, "bgr8")
             
+            # print("cv_image shape:", cv_image.shape)
             # Process image
             timestamp = msg.header.stamp.to_sec()
             t_recv = time.time()
@@ -216,7 +237,7 @@ class RosEnv:
                     crop_img = crop_img[:,::-1,::-1]  # bgr to rgb
                 
                 f = get_image_transform(
-                    input_res=img.shape[:2],
+                    input_res=img.shape[:2][::-1],  # Convert (h,w) to (w,h)
                     output_res=self.obs_image_resolution, 
                     bgr_to_rgb=True
                 )
@@ -250,6 +271,8 @@ class RosEnv:
                 
         except Exception as e:
             rospy.logerr(f"Error processing camera image: {e}")
+            import traceback
+            rospy.logerr(f"Traceback: {traceback.format_exc()}")
     
     # ======== start-stop API =============
     @property

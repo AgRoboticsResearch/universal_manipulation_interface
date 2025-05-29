@@ -79,7 +79,7 @@ def solve_table_collision(ee_pose, gripper_width, height_threshold):
 @click.command()
 @click.option('--input', '-i', required=True, help='Path to checkpoint')
 @click.option('--output', '-o', required=True, help='Directory to save recording')
-@click.option('--camera_topic', default='/camera_ee_cam', help='ROS camera topic')
+@click.option('--camera_topic', default='/camera/color/image_raw/compressed', help='ROS camera topic')
 @click.option('--joint_names', default='joint1,joint2,joint3,joint4,joint5,joint6', help='Comma-separated joint names')
 @click.option('--group_name', default='manipulator', help='MoveIt group name')
 @click.option('--eef_link', default='link06', help='End effector link name')
@@ -95,11 +95,12 @@ def solve_table_collision(ee_pose, gripper_width, height_threshold):
 @click.option('--no_mirror', is_flag=True, default=False)
 @click.option('--sim_fov', type=float, default=None)
 @click.option('--camera_intrinsics', type=str, default=None)
+@click.option('--use_compressed_image', is_flag=True, default=False, help='Use compressed image ROS messages')
 def main(
     input, output, camera_topic, joint_names, group_name, eef_link, traj_action_name,
     match_dataset, match_episode, match_camera, vis_camera_idx, init_joints, 
     steps_per_inference, max_duration, frequency,
-    no_mirror, sim_fov, camera_intrinsics):
+    no_mirror, sim_fov, camera_intrinsics, use_compressed_image):
     
     max_gripper_width = 0.09  # Maximum gripper width in meters
     gripper_speed = 0.2       # Gripper speed for manual control
@@ -189,6 +190,7 @@ def main(
                 eef_link=eef_link,
                 traj_action_name=traj_action_name,
                 camera_topic=camera_topic,
+                use_compressed_image=use_compressed_image,
                 obs_image_resolution=obs_res,
                 obs_float32=True,
                 init_joints=init_joints,
