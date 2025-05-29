@@ -2,22 +2,21 @@
 Usage:
 (umi): python eval_ros_real.py -i data/outputs/model_checkpoint.ckpt -o data_local/test_data
 
-================ Human in control ==============
-Robot movement:
-Move your SpaceMouse to move the robot EEF (locked in xy plane).
-Press SpaceMouse right button to unlock z axis.
-Press SpaceMouse left button to enable rotation axes.
-
-Recording control:
+================ Controls ==============
 Click the opencv window (make sure it's in focus).
 Press "C" to start evaluation (hand control over to policy).
 Press "Q" to exit program.
+Press "H" to reset robot to home position.
 
 ================ Policy in control ==============
 Make sure you can hit the robot hardware emergency-stop button quickly! 
 
 Recording control:
 Press "S" to stop evaluation and gain control back.
+
+================ ROS Services ==============
+Reset to home position:
+rosservice call /eval_controller/reset_to_home "{}"
 """
 
 import os
@@ -35,6 +34,8 @@ import scipy.spatial.transform as st
 import torch
 from omegaconf import OmegaConf
 import json
+import rospy
+from std_srvs.srv import Trigger, TriggerResponse
 from diffusion_policy.common.replay_buffer import ReplayBuffer
 from diffusion_policy.common.cv2_util import (
     get_image_transform
@@ -56,7 +57,6 @@ from umi.real_world.real_inference_util import (
     get_real_umi_obs_dict,
     get_real_umi_action
 )
-from umi.real_world.spacemouse_shared_memory import Spacemouse
 
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
@@ -92,19 +92,60 @@ def solve_table_collision(ee_pose, gripper_width, height_threshold):
 @click.option('--steps_per_inference', '-si', default=6, type=int, help="Action horizon for inference.")
 @click.option('--max_duration', '-md', default=60, type=int, help='Max duration for each epoch in seconds.')
 @click.option('--frequency', '-f', default=10, type=float, help="Control frequency in Hz.")
-@click.option('--command_latency', '-cl', default=0.01, type=float, help="Latency between receiving SpaceMouse command to executing on Robot in Sec.")
 @click.option('--no_mirror', is_flag=True, default=False)
 @click.option('--sim_fov', type=float, default=None)
 @click.option('--camera_intrinsics', type=str, default=None)
 def main(
     input, output, camera_topic, joint_names, group_name, eef_link, traj_action_name,
     match_dataset, match_episode, match_camera, vis_camera_idx, init_joints, 
-    steps_per_inference, max_duration, frequency, command_latency,
+    steps_per_inference, max_duration, frequency,
     no_mirror, sim_fov, camera_intrinsics):
     
     max_gripper_width = 0.09  # Maximum gripper width in meters
     gripper_speed = 0.2       # Gripper speed for manual control
     height_threshold = 0.02   # Minimum height above the table
+
+    # Initialize ROS node
+    rospy.init_node('eval_controller', anonymous=True, disable_signals=True)
+    print("ROS node initialized.")
+    
+    # Home joint state (update as needed)
+    home_joint_state = np.array([
+        -1.426289054506924e-05, 1.5749942064285278, -0.7059323787689209,
+        -0.8982672095298767, -3.4126722312066704e-05, 0.11976243555545807
+    ])
+
+    def reset_to_home_service(req):
+        """ROS service callback to reset robot to home position"""
+        try:
+            print("Resetting arm to home position...")
+            # Clear any existing commands in the queue before reset
+            cleared_count = env.robot.clear_command_queue()
+            if cleared_count > 0:
+                print(f"Cleared {cleared_count} pending commands before reset.")
+            
+            # Move to home position
+            env.robot.move_to_joint_positions(home_joint_state, duration=5.0)
+            time.sleep(6.0)  # Wait for movement to complete
+            
+            # Clear the command queue again after reset
+            cleared_count = env.robot.clear_command_queue()
+            if cleared_count > 0:
+                print(f"Cleared {cleared_count} pending commands after reset.")
+            
+            print("Reset complete.")
+            
+            # Create response
+            response = TriggerResponse()
+            response.success = True
+            response.message = "Robot reset to home position"
+            return response
+        except Exception as e:
+            # Return error response
+            response = TriggerResponse()
+            response.success = False
+            response.message = f"Error resetting to home: {str(e)}"
+            return response
 
     # Load checkpoint
     ckpt_path = input
@@ -139,8 +180,7 @@ def main(
     joint_names_list = joint_names.split(',')
     
     with SharedMemoryManager() as shm_manager:
-        with Spacemouse(shm_manager=shm_manager) as sm, \
-            KeystrokeCounter() as key_counter, \
+        with KeystrokeCounter() as key_counter, \
             RosEnv(
                 output_dir=output,
                 frequency=frequency,
@@ -170,6 +210,9 @@ def main(
                 video_bit_rate=6000*1000,
                 shm_manager=shm_manager
             ) as env:
+            
+            # Initialize reset to home service
+            reset_service = rospy.Service('/eval_controller/reset_to_home', Trigger, reset_to_home_service)
             
             cv2.setNumThreads(2)
             print("Waiting for camera...")
@@ -235,7 +278,7 @@ def main(
             
             while True:
                 # ========= Human control loop ==========
-                print("Human in control!")
+                print("Human in control! Press 'C' to start policy, 'Q' to quit, 'H' to reset home.")
                 state = env.get_robot_state()
                 target_pose = state['ActualTCPPose']
                 gripper_target_pos = max_gripper_width  # Start with open gripper
@@ -245,7 +288,6 @@ def main(
                 while True:
                     # Calculate timing
                     t_cycle_end = t_start + (iter_idx + 1) * dt
-                    t_sample = t_cycle_end - command_latency
                     t_command_target = t_cycle_end + dt
 
                     # Get observations
@@ -308,6 +350,31 @@ def main(
                             # Exit human control loop
                             # hand control over to the policy
                             start_policy = True
+                        elif key_stroke == KeyCode(char='h'):
+                            # Reset to home position
+                            try:
+                                print("Resetting arm to home position...")
+                                # Clear any existing commands in the queue before reset
+                                cleared_count = env.robot.clear_command_queue()
+                                if cleared_count > 0:
+                                    print(f"Cleared {cleared_count} pending commands before reset.")
+                                
+                                # Move to home position
+                                env.robot.move_to_joint_positions(home_joint_state, duration=5.0)
+                                time.sleep(6.0)  # Wait for movement to complete
+                                
+                                # Clear the command queue again after reset
+                                cleared_count = env.robot.clear_command_queue()
+                                if cleared_count > 0:
+                                    print(f"Cleared {cleared_count} pending commands after reset.")
+                                
+                                # Use the robot's current state rather than FK
+                                state = env.get_robot_state()
+                                target_pose = state['ActualTCPPose'].copy()
+                                print("Reset complete, using robot's reported pose.")
+                                continue  # Skip rest of loop this cycle
+                            except Exception as e:
+                                print(f"Error resetting to home: {e}")
                         elif key_stroke == KeyCode(char='e'):
                             # Next episode
                             if match_episode is not None:
@@ -337,49 +404,7 @@ def main(
                     if start_policy:
                         break
 
-                    # Wait until the right time to sample the SpaceMouse state
-                    precise_wait(t_sample)
-                    
-                    # Get teleop command from SpaceMouse
-                    sm_state = sm.get_motion_state_transformed()
-                    dpos = sm_state[:3] * (0.5 / frequency)
-                    drot_xyz = sm_state[3:] * (1.5 / frequency)
-
-                    # Apply the command to the target pose
-                    drot = st.Rotation.from_euler('xyz', drot_xyz)
-                    target_pose[:3] += dpos
-                    target_pose[3:] = (drot * st.Rotation.from_rotvec(target_pose[3:])).as_rotvec()
-                    
-                    # Avoid collision with the table
-                    solve_table_collision(
-                        ee_pose=target_pose,
-                        gripper_width=gripper_target_pos,
-                        height_threshold=height_threshold
-                    )
-                    
-                    # Handle gripper control
-                    dpos = 0
-                    if sm.is_button_pressed(0):
-                        # Close gripper
-                        dpos = -gripper_speed / frequency
-                    if sm.is_button_pressed(1):
-                        # Open gripper
-                        dpos = gripper_speed / frequency
-                    gripper_target_pos = np.clip(gripper_target_pos + dpos, 0, max_gripper_width)
-
-                    # Combine pose and gripper into a single action
-                    action = np.zeros((7,))
-                    action[:6] = target_pose
-                    action[6] = gripper_target_pos
-
-                    # Execute the teleop command
-                    env.exec_actions(
-                        actions=[action], 
-                        timestamps=[t_command_target - time.monotonic() + time.time()],
-                        compensate_latency=False
-                    )
-                    
-                    # Wait until the end of this control cycle
+                    # Wait until the end of this control cycle  
                     precise_wait(t_cycle_end)
                     iter_idx += 1
                 
